@@ -3,49 +3,111 @@
 ## v1.0 — Initial release (in development)
 
 Core adapter as specified in [`spec_v1.0.md`](spec_v1.0.md). Phases of
-implementation, in dependency order:
+implementation, in dependency order. Phases 1–5 are reordered (vs the
+original v1.0 roadmap) so the first vertical slice is exactly what the
+embedded consumer (`heatmap-sdk`) needs: WS-trade + market-data
+passthrough on a single venue. The previous "API-first / Bybit-day-one"
+ordering moved gateway-mode and second-venue work into later phases.
 
-### Phase 1 — Foundation
+### Phase 1 — Foundation (contract + storage)
 - [ ] `pyproject.toml`, dependencies pinned
-- [ ] `trade_adapter/types.py` — all dataclasses, enums (the contract surface)
+- [ ] `trade_adapter/types.py` — all dataclasses and enums:
+      `UniversalSignal` (with `correlation_id`), `OrderRequest`, `Stop`,
+      `OrderUpdate`, `Fill`, `PositionUpdate`, `BookUpdate`,
+      `TradePrint`, `BBOUpdate`, `OutcomeReport`
 - [ ] `trade_adapter/config.py` — YAML config loader with env override
 - [ ] `trade_adapter/secrets/keystore.py` — encrypted file, Argon2id KDF
 - [ ] `trade_adapter/storage/sqlite.py` — schema + DAO
-- [ ] `trade_adapter/storage/redis_pubsub.py` — pub/sub + cache (with fallback)
+- [ ] `trade_adapter/storage/redis_pubsub.py` — pub/sub + cache
+      (with in-memory fallback)
 
-### Phase 2 — Exchange adapters
+### Phase 2 — Binance USD-M Futures, WebSocket-first (vertical slice)
+
+The minimum viable adapter for the embedded consumer. One venue, one
+process, no gateway.
+
 - [ ] `trade_adapter/exchanges/base.py` — abstract `ExchangeAdapter`
-- [ ] `trade_adapter/exchanges/binance/` — REST + private/public WS
-- [ ] `trade_adapter/exchanges/bybit/` — REST + private/public WS
-- [ ] Tick/step rounding, error normalization, listenKey lifecycle
+      with WS-trade + market-data subscribe methods (A3b, A16)
+- [ ] `trade_adapter/exchanges/binance/ws_trade.py` —
+      `wss://ws-fapi.binance.com/ws-fapi/v1`, `order.place` /
+      `order.cancel` with sign + reply correlation
+- [ ] `trade_adapter/exchanges/binance/ws_user.py` — listenKey-based
+      private stream, reconnect + listenKey refresh
+- [ ] `trade_adapter/exchanges/binance/ws_market.py` — depth +
+      `aggTrade`, snapshot bootstrap via REST `/fapi/v1/depth`
+- [ ] `trade_adapter/exchanges/binance/rest.py` — bootstrap +
+      reconciliation only, every send tagged
+      `transport=rest_fallback` if used outside bootstrap (A3b)
+- [ ] `trade_adapter/marketdata/` — coalescing pub/sub layer fed by
+      `subscribe_book` / `subscribe_trades` / `subscribe_bbo`; one
+      upstream WS per `(venue, symbol)` regardless of subscriber
+      count (prohibition C.11)
 
-### Phase 3 — Core logic
-- [ ] `trade_adapter/core/signal_router.py` — validation + intent resolution + sizing
-- [ ] `trade_adapter/core/position_manager.py` — per-symbol state machine
+### Phase 3 — Core logic + embedded API
+- [ ] `trade_adapter/core/signal_router.py` — validation + intent
+      resolution + sizing, `correlation_id` propagation
+- [ ] `trade_adapter/core/position_manager.py` — per-symbol state
+      machine, child SL/TP placed on entry-order ACK (A8), MFE/MAE
+      sampler driven by `marketdata/`
+- [ ] `trade_adapter/core/outcome.py` — emits `OutcomeReport` on
+      position close (A8 cancel-on-close + sampler readout)
 - [ ] `trade_adapter/core/risk.py` — emergency kill switch
-- [ ] `trade_adapter/core/reconciliation.py` — post-reconnect REST sweep
+- [ ] `trade_adapter/core/reconciliation.py` — post-reconnect REST
+      sweep
+- [ ] `trade_adapter/embedded/adapter.py` — public `TradeAdapter` API:
+      `place_order` / `cancel_order` / `close_position` plus the
+      `subscribe_*` async iterators (A3, A16)
 
-### Phase 4 — Public API
-- [ ] `trade_adapter/api/auth.py` — Bearer token verification
-- [ ] `trade_adapter/api/signal_routes.py` — `POST /v1/signal`
-- [ ] `trade_adapter/api/position_routes.py` — close + query
-- [ ] `trade_adapter/api/info_routes.py` — health, balances, orders
-- [ ] `trade_adapter/api/events_ws.py` — outbound WS event stream
-- [ ] `trade_adapter/api/metrics_routes.py` — Prometheus
+### Phase 4 — Latency baseline + Bybit Linear
 
-### Phase 5 — Operational
+Once the Binance vertical works against a real $50 account, lock the
+A1 numbers with measurements and add the second venue.
+
+- [ ] Latency harness: in-process p50/p95 for
+      `place_order → exchange ACK`, WS event → in-process subscriber,
+      adapter overhead per hop. Update A1 in `spec_v1.0.md` with
+      observed numbers if they diverge from the targets.
+- [ ] `trade_adapter/exchanges/bybit/ws_trade.py` —
+      `wss://stream.bybit.com/v5/trade`, `order.create` /
+      `order.cancel`, with `stopLoss` / `takeProfit` bundled on entry
+      (A8)
+- [ ] `trade_adapter/exchanges/bybit/ws_user.py` — `v5/private`,
+      topics `order` / `execution` / `position`
+- [ ] `trade_adapter/exchanges/bybit/ws_market.py` —
+      `orderbook.{depth}.{symbol}` + `publicTrade.{symbol}`
+- [ ] `trade_adapter/exchanges/bybit/rest.py` — bootstrap +
+      reconciliation only
+
+### Phase 5 — Optional gateway (REST + WS facade)
+
+For remote consumers and other-language bots. Embedded consumers do
+not need this.
+
+- [ ] `trade_adapter/gateway/auth.py` — Bearer token verification
+- [ ] `trade_adapter/gateway/signal_routes.py` — `POST /v1/signal`
+- [ ] `trade_adapter/gateway/order_routes.py` — `POST /v1/order`
+- [ ] `trade_adapter/gateway/position_routes.py` — close + query
+- [ ] `trade_adapter/gateway/info_routes.py` — health, balances,
+      orders
+- [ ] `trade_adapter/gateway/events_ws.py` — outbound WS event stream
+      with opt-in market-data filters (A16)
+- [ ] `trade_adapter/gateway/metrics_routes.py` — Prometheus
+
+### Phase 6 — Operational
 - [ ] `trade_adapter/main.py` — startup/shutdown lifecycle
 - [ ] `scripts/uta-cli` — key management, consumer-token management
 - [ ] `tests/` — unit tests for pure logic (sizing math, intent
-  resolution, state machine transitions)
-- [ ] Manual integration testing against $50 real account
+  resolution, state machine transitions, MFE/MAE sampler)
+- [ ] Manual integration testing against $50 real account on both
+  venues
 - [ ] Systemd unit example
 - [ ] README operations runbook
 
-### Phase 6 — Hardening
+### Phase 7 — Hardening
 - [ ] Stress test: 100 signals/sec sustained
-- [ ] Reconnect chaos test: disconnect WS at random intervals during
-  active position
+- [ ] Reconnect chaos test: disconnect WS-trade and WS-user at
+      random intervals during an active position; verify no orphaned
+      stops, no duplicated orders (idempotency via `client_order_id`)
 - [ ] Audit log inspection tool: `uta-cli audit --signal-id ...`
 
 ---

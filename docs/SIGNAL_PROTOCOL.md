@@ -23,8 +23,18 @@ class UniversalSignal:
     sl: Optional[StopSpec]    # stop-loss spec; None = no stop
     tp: Optional[StopSpec]    # take-profit spec; None = no TP
     ttl_seconds: float        # signal expires if not actioned within TTL
-    metadata: dict[str, str]  # opaque, free-form (audit only)
+    correlation_id: Optional[str] = None
+                              # producer-side trace id, threaded through
+                              # every derived order / fill / outcome.
+                              # Defaults to signal_id if omitted.
+    metadata: dict[str, str] = field(default_factory=dict)
+                              # opaque, free-form (audit only)
 ```
+
+`correlation_id` lets a producer (e.g. `adaptive_sdk`) recognize the
+outcome of one of its own signals after the trade has closed; without
+it, the MAB feedback loop in the analytics SDK cannot learn. If the
+producer does not set it, the adapter substitutes `signal_id`.
 
 ---
 
@@ -292,9 +302,19 @@ sending two distinct signals with the same ID — that's a producer bug.
 
 ---
 
-## WebSocket event protocol
+## Event protocol (embedded mode and `WS /v1/events`)
 
-Connected consumers (`WS /v1/events`) receive a stream of events:
+In embedded mode, every channel below is exposed as an `async`
+iterator on `uta.TradeAdapter` (`subscribe_orders`,
+`subscribe_positions`, `subscribe_book`, `subscribe_trades`,
+`subscribe_bbo`, `subscribe_outcomes`, `subscribe_alerts`).
+
+In gateway mode the same payloads are framed as JSON messages on
+`WS /v1/events`. Market-data channels (`book_update`, `trade_print`,
+`bbo_update`) are opt-in per connection — the consumer sends a
+`subscribe` message specifying `{venue, symbol, channels}`.
+
+Event types:
 
 ### `signal_accepted`
 ```json
@@ -330,6 +350,103 @@ Connected consumers (`WS /v1/events`) receive a stream of events:
 ```json
 { "type": "reconcile_diff", "ts": ..., "data": { "venue": ..., "kind": "ORDER_MISSING_LOCAL"|"POSITION_QTY_MISMATCH"|..., "details": ... } }
 ```
+
+### `book_update`
+
+Top-N book snapshot or per-level deltas (subscription chooses).
+
+```json
+{
+  "type": "book_update",
+  "ts": ...,
+  "data": {
+    "venue": "binance_um",
+    "symbol": "BTCUSDT",
+    "kind": "snapshot" | "delta",
+    "bids": [[price, qty], ...],
+    "asks": [[price, qty], ...],
+    "ts_event": 1700000000.012,    // exchange-side ts (ms-precision float)
+    "ts_recv":  1700000000.018,    // adapter-side ts on WS arrival
+    "seq":      4839128
+  }
+}
+```
+
+### `trade_print`
+
+A single trade print on the public tape.
+
+```json
+{
+  "type": "trade_print",
+  "ts": ...,
+  "data": {
+    "venue": "binance_um",
+    "symbol": "BTCUSDT",
+    "price": 64512.3,
+    "qty": 0.014,
+    "is_buyer_maker": true,         // Binance convention; True => seller initiated
+    "trade_id": "...",
+    "ts_event": 1700000000.012,
+    "ts_recv":  1700000000.018
+  }
+}
+```
+
+### `bbo_update`
+
+Throttled best-bid/ask snapshot (default 10 ms cadence).
+
+```json
+{
+  "type": "bbo_update",
+  "ts": ...,
+  "data": {
+    "venue": "binance_um",
+    "symbol": "BTCUSDT",
+    "bid_price": 64511.9, "bid_qty": 1.42,
+    "ask_price": 64512.1, "ask_qty": 0.83,
+    "ts_event": 1700000000.020,
+    "ts_recv":  1700000000.022
+  }
+}
+```
+
+### `outcome_report`
+
+Emitted once when a position closes (state machine reaches `IDLE` after
+`CLOSING`). Carries the realized economics plus extrema sampled during
+the lifetime of the position so the analytics SDK's MAB can learn.
+
+```json
+{
+  "type": "outcome_report",
+  "ts": ...,
+  "data": {
+    "correlation_id":  "5f1d2c3a-...",   // mirrors UniversalSignal.correlation_id
+    "signal_id":       "5f1d2c3a-...",   // origin signal
+    "venue":           "binance_um",
+    "symbol":          "BTCUSDT",
+    "side":            "LONG",
+    "qty":             0.5,
+    "entry_price":     64500.0,
+    "exit_price":      64880.0,
+    "pnl_usd":         190.0,            // realized PnL after fees, in quote
+    "fees_usd":        2.30,
+    "slippage_bps":    1.2,              // |fill_price - intended_price| / intended
+    "mfe_usd":         245.0,            // max favorable excursion in quote
+    "mae_usd":         -35.0,            // max adverse excursion in quote
+    "holding_time_ms": 18420,
+    "close_reason":    "sl" | "tp" | "manual" | "signal" | "reconcile" | "liquidation",
+    "opened_at":       1700000000.018,
+    "closed_at":       1700000018.438
+  }
+}
+```
+
+MFE / MAE are computed by the adapter sampling mid-price (or BBO if
+opt-in) on every market-data tick during the position's lifetime. The
+sampler runs in-process; no extra exchange call.
 
 ---
 

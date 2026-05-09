@@ -1,7 +1,28 @@
-# Universal Trade Adapter — Specification v1.0 (LOCKED)
+# Universal Trade Adapter — Specification v1.0
 
-> **Status:** Locked. All 15 decisions have been signed off.
-> Departing from any of them requires a major version bump and explicit re-review.
+> **Status:** Pre-implementation revision (2026-05). The original v1.0
+> spec was locked at 15 decisions; this revision is being applied **before
+> any implementation has shipped** in response to integration analysis
+> with `heatmap-sdk` (the first real consumer). The decision count moves
+> from 15 to 17 (new **A3b** Exchange transport, new **A16** Market data
+> publish). **A1**, **A3**, **A8** were rewritten; the rest of the
+> locked decisions are unchanged. Once implementation begins, any further
+> change to a numbered decision requires a major version bump.
+
+### What changed vs v1.0-original
+
+| # | Decision | Change |
+|---|---|---|
+| A1 | Stack | Latency target rewritten with concrete per-hop budgets (was "sub-second"). |
+| A3 | Outward transport | Embedded Python API is now the primary mode; REST/WS gateway is the optional remote-access mode. |
+| A3b | Exchange transport (NEW) | Trading and user-data are WebSocket-first; REST is allowed only for bootstrap, reconciliation, and explicit fallback. |
+| A8 | SL/TP placement | SL/TP are submitted in a single `place_order` call (bundled where the venue allows; child-on-ACK on Binance UM). |
+| A16 | Market data publish (NEW) | Adapter publishes `book_update` / `trade_print` / `bbo_update` to subscribers so consumers do not open duplicate venue streams. |
+
+A10 (`UniversalSignal`) gains an optional `correlation_id` field — see
+[`SIGNAL_PROTOCOL.md`](SIGNAL_PROTOCOL.md). New event type
+`outcome_report` is added in the same document so the analytics SDK can
+close the MAB feedback loop.
 
 ---
 
@@ -39,12 +60,23 @@ versioning, independent deployment lifecycle.
 
 - Python 3.11+ (uses `dataclass(slots=True)`, PEP 673)
 - `asyncio` for concurrency
-- `FastAPI` for the public HTTP API
+- `FastAPI` for the optional gateway HTTP/WS API (see A3)
 - `websockets` for outbound exchange connections
-- `uvicorn` for the ASGI server
+- `uvicorn` for the ASGI server (gateway mode)
 - `numpy`/`pydantic` only where needed; avoid pandas/scipy
-- Latency target: sub-second decisions, NOT sub-millisecond. HFT is out of
-  scope for this stack choice.
+- **Latency targets** (operator VPS at 10–30 ms RTT to exchange, warm WS
+  connections, p95):
+  - `≤ 25 ms` from `place_order()` call to exchange `order ACK`.
+  - `≤ 10 ms` from a private/public WS event arriving on the wire to
+    delivery to an in-process subscriber.
+  - `≤ 5 ms` adapter-added overhead on top of network RTT for any
+    single hop (sign + send, parse + dispatch).
+  - In gateway mode, add one local loopback hop and JSON
+    (de)serialization on top of the embedded numbers.
+- HFT-class sub-millisecond latency (kernel bypass, colo, C++/Rust
+  hot-path) is explicitly out of scope; the wide-area network is the
+  bottleneck on this stack and the adapter's own overhead is engineered
+  to stay below it.
 
 ### A2. API key storage: encrypted file
 
@@ -61,14 +93,70 @@ versioning, independent deployment lifecycle.
   them as plaintext attributes for more than the duration of a single
   HTTP call.
 
-### A3. Outward transport: REST + WebSocket
+### A3. Outward transport: embedded-first, REST/WS gateway optional
 
-- **REST (FastAPI)** for commands: `POST /signal`, `POST /order`,
-  `POST /position/close`, `GET /positions`, etc.
-- **WebSocket (`/events`)** for outbound push: fills, position changes,
-  errors, reconnect events.
-- Single port, both protocols share authentication and connection
-  lifecycle.
+The adapter ships as a Python package and supports two interchangeable
+modes against the same core:
+
+- **Embedded mode (default).** Consumers in the same Python process
+  (`heatmap-sdk`, custom strategies, the Adaptive Analytics SDK) import
+  `uta.TradeAdapter` directly. Commands are method calls
+  (`place_order`, `cancel_order`, `close_position`); events are
+  `async` iterators (`subscribe_orders`, `subscribe_positions`,
+  `subscribe_book`, `subscribe_trades`, `subscribe_bbo`,
+  `subscribe_outcomes`). No serialization, no extra hop.
+- **Gateway mode (optional).** A FastAPI server wraps the same core and
+  exposes:
+  - REST: `POST /v1/signal`, `POST /v1/order`,
+    `POST /v1/position/close`, `GET /v1/positions`, `GET /v1/orders`,
+    `GET /v1/balances`, `GET /v1/health`.
+  - WebSocket: `WS /v1/events` for fan-out of every event channel with
+    per-subscription filters by `(type, venue, symbol)`.
+  - Single port, shared authentication and connection lifecycle.
+
+  Gateway mode is for remote consumers (other-language bots, multi-host
+  deployments). It is not on the latency path of in-process consumers.
+
+Both modes use the same data contracts. A consumer authored against the
+embedded API can be moved behind the gateway without changing the
+event schema it observes.
+
+### A3b. Exchange transport: WebSocket-first
+
+For both venues, the adapter uses WebSocket for trading and user-data,
+not REST:
+
+- **Trading.** Order placement and cancellation go over the venue's
+  trading WebSocket:
+  - Binance USD-M Futures: `wss://ws-fapi.binance.com/ws-fapi/v1`,
+    methods `order.place` / `order.cancel`.
+  - Bybit Linear: `wss://stream.bybit.com/v5/trade`,
+    ops `order.create` / `order.cancel`.
+- **User-data.** Fills, order updates, and position updates come from
+  the venue's private WebSocket:
+  - Binance: listenKey-based user-data stream
+    (`wss://fstream.binance.com/ws/{listenKey}`), `ORDER_TRADE_UPDATE`
+    and `ACCOUNT_UPDATE`.
+  - Bybit: private V5 stream
+    (`wss://stream.bybit.com/v5/private`), topics `order`,
+    `execution`, `position`.
+- **Market data.** Public depth + trade streams over WebSocket
+  (Binance `@depth@100ms` + `@aggTrade`, Bybit
+  `orderbook.{depth}.{symbol}` + `publicTrade.{symbol}`).
+
+REST is allowed only for:
+
+1. One-time bootstrap: order-book snapshot
+   (Binance `/fapi/v1/depth?limit=1000`), exchange info (`tickSize`,
+   `stepSize`), listenKey lifecycle, position-mode setup.
+2. Reconciliation after WebSocket reconnect (decision A9).
+3. Explicit fallback when a WS channel has been unavailable beyond a
+   configurable degradation timeout. Every fallback REST send is logged
+   with `transport=rest_fallback` and counted by an explicit metric
+   counter (see A15).
+
+Steady-state trading and event ingest do not depend on REST. There is
+no periodic REST polling of positions or orders in normal operation.
 
 ### A4. Outward authentication: Bearer token per consumer
 
@@ -78,6 +166,8 @@ versioning, independent deployment lifecycle.
   handshake.
 - Roles intentionally **out of v1.0** — tokens are equally privileged.
   Roles (read / trade / admin) move to v1.1 if needed.
+- Embedded mode does not authenticate — it runs in the same trust
+  domain as the consumer. Consumer tokens apply only to gateway mode.
 
 ### A5. State store: SQLite (truth) + Redis (cache + pub/sub)
 
@@ -118,18 +208,26 @@ versioning, independent deployment lifecycle.
   supported in v1.0.** Strategies needing hedge mode (e.g. funding
   capture with simultaneous spot/perp legs across symbols) require v2.0.
 
-### A8. SL/TP placement: native exchange stop-orders, configurable
+### A8. SL/TP placement: native, attached to the entry order
 
-- Default: SL is placed as a native exchange stop-order immediately upon
-  entry fill confirmation.
-- Default: TP is also a native stop-order (TAKE_PROFIT_MARKET) by default.
-- Per-signal override: `sl: { mode: "native" | "local", ... }`
-- Native mode: stop sits on the exchange. If the adapter dies, exchange
-  still closes the position. Required for production.
-- Local mode: adapter holds trigger price in memory and emits market
+- Default mode is **native**: SL and TP live on the exchange so they
+  survive an adapter crash.
+- Default delivery is **bundled with the entry order in a single
+  `place_order` call**:
+  - Bybit Linear accepts `stopLoss` / `takeProfit` parameters directly
+    on the entry order (V5). The adapter passes them through.
+  - Binance USD-M Futures does not bundle natively; the adapter
+    submits child `STOP_MARKET` / `TAKE_PROFIT_MARKET` orders
+    immediately on entry-order ACK (not on fill), so a network pause
+    between ACK and fill cannot leave the position unprotected. Child
+    orders are `reduceOnly=true` and use `closePosition=true` where
+    applicable.
+- Per-signal override: `sl: { mode: "native" | "local", ... }`.
+- Local mode: adapter holds trigger price in memory and emits a market
   close when triggered. Useful for trailing logic that updates frequently.
-- Cancel-on-position-close: closing a position must cancel its child SL/TP
-  orders. Verified by post-close REST sweep.
+- Cancel-on-position-close: closing a position must cancel its child
+  SL/TP orders. Verified by post-close REST sweep (A9 reconciliation
+  path).
 
 ### A9. Reconnect: aggressive REST reconciliation
 
@@ -234,7 +332,42 @@ Adding a third venue must not require any changes outside
   - `uta_reconcile_diffs_total{venue, kind}`
   - `uta_emergency_rejects_total{reason}`
   - `uta_request_latency_seconds{venue, method}` (histogram)
+  - `uta_order_send_latency_seconds{venue, transport}` (histogram of
+    `place_order` → exchange ACK; `transport ∈ {ws, rest_fallback}`)
+  - `uta_event_dispatch_latency_seconds{kind}` (histogram of WS
+    on-wire → in-process subscriber for `fill`, `book_update`,
+    `trade_print`)
+  - `uta_rest_fallback_total{venue, op}` (counter; should stay near
+    zero in steady state)
 - No OpenTelemetry traces in v1.0.
+
+### A16. Market data publish
+
+The adapter publishes raw market data to internal subscribers (embedded
+mode) and to opted-in gateway consumers. This exists so heatmap-sdk-class
+consumers do not have to open their own WebSocket to the same
+`(venue, symbol)`.
+
+Channels:
+
+- `book_update` — top-N levels of the book (default `N=50`) or per-level
+  deltas, depending on subscription type. Carries `ts_event` (exchange
+  timestamp), `ts_recv` (adapter receive timestamp), `seq`.
+- `trade_print` — single-trade events with `price`, `qty`, aggressor
+  side (`is_buyer_maker` semantics), `ts_event`, `ts_recv`.
+- `bbo_update` — best bid/ask snapshot with sizes; throttled (default
+  10 ms) for cache-driven sizing math.
+
+Subscription is per `(venue, symbol)`. The adapter coalesces multiple
+in-process subscribers onto a single venue WebSocket connection per
+`(venue, symbol)` — no duplicate exchange streams.
+
+In gateway mode the same channels are exposed on `WS /v1/events` with
+filters; consumers opt in explicitly to avoid bandwidth blowup.
+
+Market-data publish is decoupled from trading: an embedded consumer
+that only needs the book or trade tape can use the adapter without
+ever calling `place_order`.
 
 ---
 
@@ -243,6 +376,10 @@ Adding a third venue must not require any changes outside
 All endpoints require `Authorization: Bearer <consumer_token>`. Errors
 return JSON `{error: {code, message, details}}` with appropriate HTTP
 status.
+
+Endpoints below describe the **gateway mode** surface (A3). Embedded
+mode exposes the same operations as Python method calls and async
+iterators on `uta.TradeAdapter`; see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ### `POST /v1/signal`
 
@@ -323,7 +460,16 @@ Server pushes JSON messages of the form:
 { "type": "position_update", ... }
 { "type": "alert", "severity": "warning", ... }
 { "type": "reconcile_diff", ... }
+{ "type": "book_update", "data": { ... } }
+{ "type": "trade_print", "data": { ... } }
+{ "type": "bbo_update", "data": { ... } }
+{ "type": "outcome_report", "data": { ... } }
 ```
+
+Market data channels (`book_update`, `trade_print`, `bbo_update`) are
+opt-in per connection: consumers send a `subscribe` message specifying
+`{venue, symbol, channels}` to receive them. See A16 and
+[`SIGNAL_PROTOCOL.md`](SIGNAL_PROTOCOL.md).
 
 ---
 
@@ -343,6 +489,10 @@ The implementation MUST NOT:
 8. Skip emergency kill-switch checks unless config-disabled.
 9. Use `pickle` for any state persistence (use SQLite + JSON only).
 10. Block the asyncio event loop with synchronous file/network I/O.
+11. Open more than one venue WebSocket per `(venue, symbol)` for the
+    same channel type (multiple subscribers must share one connection).
+12. Send orders or cancellations over REST in steady state — REST is
+    bootstrap, reconciliation, and explicit fallback only (A3b).
 
 ---
 
@@ -365,6 +515,12 @@ The implementation MUST:
 9. Survive Redis outage without corrupting SQLite state.
 10. Run on a single process, single host. No distributed coordination
     required for v1.0.
+11. Propagate `correlation_id` (when present on the signal) onto every
+    derived `OrderRequest`, `OrderUpdate`, `Fill`, `PositionUpdate`,
+    and `OutcomeReport` so a producer can thread a signal end-to-end.
+12. Emit an `outcome_report` event for every closed position,
+    including realized PnL, fees, slippage, holding time, MFE, and MAE
+    (see [`SIGNAL_PROTOCOL.md`](SIGNAL_PROTOCOL.md)).
 
 ---
 
@@ -391,7 +547,8 @@ Implementation begins when this spec is signed off. The implementation
 work is broken into phases per [`ROADMAP.md`](ROADMAP.md). Spec review
 checklist:
 
-- [ ] Section A — all 15 decisions match what was agreed.
+- [ ] Section A — all 17 decisions (A0–A16, including A3b) match what
+      was agreed.
 - [ ] Section B — API surface covers required operations.
 - [ ] Section C — prohibitions are exhaustive.
 - [ ] Section D — requirements are achievable.

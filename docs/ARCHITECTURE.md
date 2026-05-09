@@ -7,25 +7,37 @@ Block-by-block view of the adapter. For the locked contract see
 
 ## Top-level diagram
 
+The adapter exposes the same core through two transports (decision A3):
+an in-process Python API for embedded consumers and an optional FastAPI
+gateway for remote consumers.
+
 ```
-                        Consumers
-   ┌───────────────┐  ┌───────────────┐  ┌───────────────┐
-   │ Analytics SDK │  │ Manual UI     │  │ External Bot  │
-   └───────┬───────┘  └───────┬───────┘  └───────┬───────┘
-           │  REST: POST /signal             │
-           └──────────────────┬──────────────┘
-                              │  Bearer token auth
-                              ▼
+        In-process embedded consumers              Remote consumers
+   ┌──────────────┐  ┌──────────────┐         ┌──────────────────┐
+   │ heatmap-sdk  │  │ Adaptive SDK │         │ External bot /   │
+   │ + UI         │  │ (numpy core) │         │ other-language   │
+   └──────┬───────┘  └──────┬───────┘         └────────┬─────────┘
+          │ method calls    │ method calls              │ HTTPS / WSS
+          │ + async iters   │ + async iters             │ Bearer token
+          └────────┬────────┴───────────────┐           │
+                   ▼                        │           ▼
    ┌──────────────────────────────────────────────────────────────────┐
-   │                  Universal Trade Adapter                         │
+   │                Universal Trade Adapter (one process)             │
    │                                                                  │
    │  ┌─────────────────────────────────────────────────────────────┐ │
-   │  │  trade_adapter/api/        (FastAPI + WS)                   │ │
+   │  │  trade_adapter/embedded/   (default API, A3)                │ │
+   │  │   place_order / cancel_order / close_position               │ │
+   │  │   subscribe_orders / subscribe_positions / subscribe_fills  │ │
+   │  │   subscribe_book / subscribe_trades / subscribe_bbo  (A16)  │ │
+   │  │   subscribe_outcomes / subscribe_alerts                     │ │
+   │  └─────────────────────────────────────────────────────────────┘ │
+   │  ┌─────────────────────────────────────────────────────────────┐ │
+   │  │  trade_adapter/gateway/    (optional FastAPI + WS, A3)      │ │
    │  │   POST /v1/signal      POST /v1/order                       │ │
    │  │   POST /v1/position/close                                   │ │
    │  │   GET  /v1/positions, /v1/orders, /v1/balances              │ │
    │  │   GET  /v1/health      GET  /metrics                        │ │
-   │  │   WS   /v1/events     ← fan-out from internal pub/sub       │ │
+   │  │   WS   /v1/events    ← fan-out + opt-in market data         │ │
    │  └────────────────────────┬────────────────────────────────────┘ │
    │                           │  UniversalSignal                     │
    │                           ▼                                      │
@@ -45,21 +57,32 @@ Block-by-block view of the adapter. For the locked contract see
    │  │   per-symbol state machine (asyncio.Lock per symbol)        │ │
    │  │     IDLE → OPENING → OPEN → REDUCING → CLOSING → IDLE       │ │
    │  │   - emits OrderRequest                                      │ │
-   │  │   - on fill: updates entry price, attaches/updates SL/TP    │ │
-   │  │   - on close: cancels child SL/TP                           │ │
+   │  │   - on ACK: places child SL/TP (Binance UM) or passes them  │ │
+   │  │     through (Bybit V5 single-call)                          │ │
+   │  │   - on close: cancels child SL/TP, emits OutcomeReport      │ │
+   │  │   - mid-price sampler tracks MFE/MAE while position open    │ │
    │  └────────────────────────┬────────────────────────────────────┘ │
    │                           │  OrderRequest                        │
    │                           ▼                                      │
    │  ┌─────────────────────────────────────────────────────────────┐ │
+   │  │  trade_adapter/marketdata/   (A16, fed by exchange WS)      │ │
+   │  │   - book + trade tape pub/sub, one upstream connection per  │ │
+   │  │     (venue, symbol), coalesced subscribers, BBO throttler   │ │
+   │  │   - feeds the in-process bus and the gateway WS broadcaster │ │
+   │  └─────────────────────────────────────────────────────────────┘ │
+   │  ┌─────────────────────────────────────────────────────────────┐ │
    │  │  trade_adapter/exchanges/  (Exchange Abstraction)           │ │
    │  │   abstract: ExchangeAdapter                                 │ │
-   │  │     place_order(req) → OrderAck                             │ │
-   │  │     cancel_order(client_order_id)                           │ │
-   │  │     fetch_positions(), fetch_orders(), fetch_balance()      │ │
-   │  │     subscribe_market_data(), subscribe_user_data()          │ │
+   │  │     place_order(req) → OrderAck         (over WS-trade A3b) │ │
+   │  │     cancel_order(client_order_id)       (over WS-trade A3b) │ │
+   │  │     fetch_positions/orders/balance      (REST, bootstrap +  │ │
+   │  │                                          reconcile only)    │ │
+   │  │     subscribe_user_data()               (private WS)        │ │
+   │  │     subscribe_book/trades/bbo()         (public WS, A16)    │ │
    │  │   impls: binance/, bybit/                                   │ │
-   │  │   - per-venue REST clients with sign + nonce                │ │
-   │  │   - per-venue WS clients with auto-reconnect                │ │
+   │  │   - per-venue WS-trade clients with sign + reply correlation│ │
+   │  │   - per-venue REST clients (bootstrap + reconcile only)     │ │
+   │  │   - per-venue public/private WS clients with auto-reconnect │ │
    │  │   - tick/step rounding                                      │ │
    │  │   - error normalization                                     │ │
    │  └────────────────┬─────────────────────────┬──────────────────┘ │
@@ -67,9 +90,12 @@ Block-by-block view of the adapter. For the locked contract see
    │                   ▼                         ▼                    │
    │  ┌──────────────────────┐    ┌──────────────────────┐            │
    │  │  Binance USD-M       │    │  Bybit Linear        │            │
-   │  │  - REST (HTTPS)      │    │  - REST (HTTPS)      │            │
-   │  │  - public WS (mkt)   │    │  - public WS (mkt)   │            │
+   │  │  - WS-trade (orders) │    │  - WS-trade (orders) │            │
    │  │  - private WS (user) │    │  - private WS (user) │            │
+   │  │  - public WS (depth +│    │  - public WS (book + │            │
+   │  │    aggTrade)         │    │    publicTrade)      │            │
+   │  │  - REST (bootstrap + │    │  - REST (bootstrap + │            │
+   │  │    reconcile only)   │    │    reconcile only)   │            │
    │  └──────────────────────┘    └──────────────────────┘            │
    │                                                                  │
    │  ┌─────────────────────────────────────────────────────────────┐ │
@@ -91,9 +117,54 @@ Block-by-block view of the adapter. For the locked contract see
 
 ## Component contracts
 
-### `trade_adapter/api/`
+### `trade_adapter/embedded/`
 
-FastAPI app exposing the public surface. Router modules:
+The primary public API. `TradeAdapter` is a thin object whose methods
+are 1:1 with the operations exposed in gateway mode:
+
+```python
+from uta.embedded import TradeAdapter
+from uta.types import OrderRequest, Stop, Side, Venue, OrderType
+
+adapter = TradeAdapter(
+    venue=Venue.BINANCE_UM,
+    keystore_path="~/.uta/keys",
+    transport="ws_first",       # default; opens WS-trade + WS-user-data
+)
+await adapter.start()
+
+# trading
+ack = await adapter.place_order(OrderRequest(
+    symbol="BTCUSDT", side=Side.BUY, type=OrderType.MARKET, qty=0.01,
+    correlation_id=signal.signal_id,
+    sl=Stop(price=64000.0, mode="native"),
+    tp=Stop(price=66000.0, mode="native"),
+))
+await adapter.cancel_order(ack.client_order_id)
+await adapter.close_position("BTCUSDT")
+
+# state and execution events
+async for upd in adapter.subscribe_orders("BTCUSDT"): ...
+async for upd in adapter.subscribe_positions("BTCUSDT"): ...
+async for fill in adapter.subscribe_fills("BTCUSDT"): ...
+
+# market data passthrough (A16)
+async for book in adapter.subscribe_book("BTCUSDT", depth=50): ...
+async for tp in adapter.subscribe_trades("BTCUSDT"): ...
+async for bbo in adapter.subscribe_bbo("BTCUSDT"): ...
+
+# outcome feedback (closes the MAB loop in adaptive_sdk)
+async for oc in adapter.subscribe_outcomes("BTCUSDT"): ...
+```
+
+The iterators back onto an internal pub/sub. Multiple subscribers on
+the same `(venue, symbol, channel)` share one upstream WS connection
+(decision A16, prohibition C.11).
+
+### `trade_adapter/gateway/`
+
+FastAPI app exposing the same surface to remote consumers. Router
+modules:
 
 | File | Endpoints | Purpose |
 |---|---|---|
@@ -102,11 +173,13 @@ FastAPI app exposing the public surface. Router modules:
 | `position_routes.py` | `POST /v1/position/close`, `GET /v1/positions` | Position queries and manual close. |
 | `info_routes.py` | `GET /v1/orders`, `GET /v1/balances`, `GET /v1/health` | Read-only diagnostics. |
 | `metrics_routes.py` | `GET /metrics` | Prometheus scrape (loopback only by default). |
-| `events_ws.py` | `WS /v1/events` | Outbound fan-out to authenticated consumers. |
+| `events_ws.py` | `WS /v1/events` | Outbound fan-out, including opt-in market-data channels. |
 
 Authentication is a single FastAPI dependency `verify_consumer_token` that
 runs on every endpoint. WS upgrade reads the token from the
-`Authorization` header before accepting the connection.
+`Authorization` header before accepting the connection. Embedded mode
+bypasses this dependency entirely (it runs in the same trust domain as
+the consumer).
 
 ### `trade_adapter/core/`
 
@@ -188,33 +261,60 @@ async def reconcile(venue, ctx):
 ```python
 class ExchangeAdapter(ABC):
     venue: str
-    
+
+    # Trading: WebSocket by default (A3b). REST is fallback only.
     @abstractmethod
     async def place_order(self, req: OrderRequest) -> OrderAck: ...
     @abstractmethod
     async def cancel_order(self, client_order_id: str, symbol: str) -> None: ...
+
+    # State queries: REST, used for bootstrap and reconciliation only.
     @abstractmethod
     async def fetch_positions(self) -> list[Position]: ...
     @abstractmethod
     async def fetch_open_orders(self) -> list[Order]: ...
     @abstractmethod
     async def fetch_balance(self) -> Balance: ...
+
+    # Streams: WebSocket only.
     @abstractmethod
     async def subscribe_user_data(self, on_event: Callable[[Event], Awaitable]) -> None: ...
     @abstractmethod
-    async def subscribe_market_data(self, symbols: list[str], on_event: Callable) -> None: ...
+    async def subscribe_book(
+        self, symbol: str, depth: int, on_event: Callable[[BookUpdate], Awaitable]
+    ) -> None: ...
+    @abstractmethod
+    async def subscribe_trades(
+        self, symbol: str, on_event: Callable[[TradePrint], Awaitable]
+    ) -> None: ...
+    @abstractmethod
+    async def subscribe_bbo(
+        self, symbol: str, on_event: Callable[[BBOUpdate], Awaitable]
+    ) -> None: ...
+
+    # Rounding helpers (driven by exchangeInfo bootstrap).
     @abstractmethod
     async def round_qty(self, symbol: str, qty: float) -> float: ...
     @abstractmethod
     async def round_price(self, symbol: str, price: float) -> float: ...
 ```
 
+The `marketdata/` layer wraps the per-venue `subscribe_book` /
+`subscribe_trades` / `subscribe_bbo` calls behind a coalescing fan-out:
+any number of in-process subscribers on the same `(venue, symbol)`
+share exactly one upstream WebSocket (prohibition C.11).
+
 #### `binance/` and `bybit/`
 
 Each owns:
-- `rest.py` — signed REST client with retry policy
-- `ws_user.py` — private WebSocket with reconnect + listenKey refresh
-- `ws_market.py` — public WebSocket subscription manager
+- `ws_trade.py` — trading WebSocket (Binance `ws-fapi` /
+  Bybit `v5/trade`); request signing, reply correlation, reconnect.
+- `ws_user.py` — private WebSocket with reconnect + listenKey refresh.
+- `ws_market.py` — public WebSocket subscription manager (depth +
+  trades; book snapshot bootstrap on Binance).
+- `rest.py` — signed REST client used only for bootstrap and
+  reconciliation; every send increments
+  `uta_rest_fallback_total` if `transport=rest_fallback`.
 - `mappers.py` — schema translators (their format ↔ internal dataclasses)
 - `errors.py` — error code → `ExchangeError` enum
 
@@ -423,8 +523,15 @@ Concrete walkthrough of a single signal:
 11. WS broadcaster fans out `position_update` event to all connected
     consumer WS clients.
 
-End-to-end latency target: <500ms from `POST /v1/signal` returning to
-fill received (when exchange is responsive).
+End-to-end latency targets (decision A1, p95, warm WS, VPS pings
+10–30 ms):
+
+- `place_order()` call → exchange ACK: `≤ 25 ms`.
+- WS event arrival on the wire → in-process subscriber: `≤ 10 ms`.
+- Adapter-added overhead per hop: `≤ 5 ms` on top of network RTT.
+
+Gateway mode adds one local loopback hop and JSON serialization on top
+of the embedded numbers.
 
 ---
 
