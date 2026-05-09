@@ -1,0 +1,6 @@
+{
+  "atr_period_seconds": 900,
+  "kind": "atr_multiple",
+  "mode": "local",
+  "multiple": 2.0
+}

@@ -1,0 +1,8 @@
+{
+  "accepted": false,
+  "correlation_id": null,
+  "duplicate": false,
+  "rejection_reason": "TTL_EXPIRED",
+  "signal_id": "sig-2",
+  "ts": 1700000000.0
+}

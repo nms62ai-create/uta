@@ -1,0 +1,14 @@
+{
+  "correlation_id": "corr-1",
+  "direction": "LONG",
+  "entry_price": 65000.0,
+  "liquidation_price": 58000.0,
+  "margin_used_usd": 325.0,
+  "qty": 0.05,
+  "signal_id": "sig-1",
+  "state": "OPEN",
+  "symbol": "BTCUSDT",
+  "ts": 1700000000.5,
+  "unrealized_pnl_usd": 12.5,
+  "venue": "binance_um"
+}

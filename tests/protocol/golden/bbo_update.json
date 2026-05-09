@@ -1,0 +1,9 @@
+{
+  "ask_price": 65001.0,
+  "ask_qty": 1.0,
+  "bid_price": 64999.0,
+  "bid_qty": 1.5,
+  "symbol": "BTCUSDT",
+  "ts": 1700000000.345,
+  "venue": "binance_um"
+}
