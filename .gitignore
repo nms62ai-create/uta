@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# adapter-specific (must NEVER be committed)
+secrets.enc
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.uta/
