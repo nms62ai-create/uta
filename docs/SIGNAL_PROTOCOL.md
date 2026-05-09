@@ -19,7 +19,7 @@ class UniversalSignal:
     venue: Venue              # "binance_um" | "bybit_linear"
     direction: Direction      # "LONG" | "SHORT"
     intent: Intent            # "OPEN" | "ADD" | "REDUCE" | "CLOSE" | "REVERSE"
-    sizing: SizingSpec        # exactly one of FixedQty / PctEquity / RiskBased
+    sizing: SizingSpec        # exactly one of FixedQty / NotionalUsd / PctEquity / RiskBased
     sl: Optional[StopSpec]    # stop-loss spec; None = no stop
     tp: Optional[StopSpec]    # take-profit spec; None = no TP
     ttl_seconds: float        # signal expires if not actioned within TTL
@@ -78,7 +78,7 @@ producer does not set it, the adapter substitutes `signal_id`.
 
 ## Sizing
 
-Exactly one of these three variants must be set on each signal.
+Exactly one of these four variants must be set on each signal.
 
 ### `FixedQty`
 
@@ -89,6 +89,24 @@ Literal quantity in base asset.
 ```
 
 Rounded to symbol's step size before submission.
+
+### `NotionalUsd`
+
+Literal USD-equivalent notional. Adapter divides by the cached BBO mid
+(or the venue's mark price if the BBO has not arrived yet) at signal-
+receipt time and rounds the resulting `qty` to the venue's `stepSize`.
+This is the natural mode for UI-driven flows where the operator types
+a dollar amount directly.
+
+```json
+{ "kind": "notional_usd", "notional_usd": 500.0 }
+```
+
+Computation:
+```
+entry_price = best_ask (long) | best_bid (short)
+qty         = round_step( notional_usd / entry_price, stepSize )
+```
 
 ### `PctEquity`
 
@@ -138,6 +156,18 @@ Used for both `sl` and `tp`. Multiple specification modes:
 ```
 
 50 bps = 0.5%. Sign inferred from `direction` (long: SL below, TP above).
+
+### `PctFromEntry`
+
+Ergonomic alias of `BpsFromEntry` for UI-driven flows where the
+operator types a percentage directly. Internally converted to
+`BpsFromEntry` at parse time (`pct × 100 = bps`).
+
+```json
+{ "kind": "pct", "pct": 0.5, "mode": "native" }
+```
+
+`0.5` = 0.5% from entry.
 
 ### `AtrMultiple`
 
@@ -198,6 +228,32 @@ during routing (e.g. due to retry queueing), it is rejected with
   }
 }
 ```
+
+### Heatmap-sdk UI: $-notional + %-stops
+
+Operator chose `BTCUSDT` on Binance UM, set `$500` trade size,
+`SL = 0.5%`, `TP = 1.0%`, then heatmap-sdk's analytics fired BUY:
+
+```json
+{
+  "signal_id": "...",
+  "source": "heatmap_sdk",
+  "symbol": "BTCUSDT",
+  "venue": "binance_um",
+  "direction": "LONG",
+  "intent": "OPEN",
+  "sizing": { "kind": "notional_usd", "notional_usd": 500.0 },
+  "sl": { "kind": "pct", "pct": 0.5, "mode": "native" },
+  "tp": { "kind": "pct", "pct": 1.0, "mode": "native" },
+  "ttl_seconds": 3.0,
+  "metadata": { "ui_session": "op-1-2026-05" }
+}
+```
+
+The adapter converts `notional_usd → qty` from the cached BBO and
+the `pct` stops to absolute prices at submission time, then ships
+entry + SL + TP in one `place_order` (on Binance UM as `STOP_MARKET
+closePosition=true` parallel to the entry, per A8).
 
 ### Manual close from UI
 

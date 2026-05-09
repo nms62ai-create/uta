@@ -4,20 +4,24 @@
 > spec was locked at 15 decisions; an interim revision against
 > `heatmap-sdk` integration analysis took it to 17 (new **A3b**, new
 > **A16**, rewritten **A1/A3/A8**). A subsequent post-critique cleanup
-> raised it to 23: contradictions between latency targets and the
-> mandatory-Redis state store / sync audit-log requirement were resolved,
-> and previously-implicit safety items (rate-limit pre-throttling, time
+> raised it to 22: contradictions between the mandatory-Redis state
+> store and a sync audit-log on the hot path were resolved, and
+> previously-implicit safety items (rate-limit pre-throttling, time
 > sync, cancel-on-disconnect, backpressure, light-strategy disclosure,
 > BBO auto-subscribe for MFE/MAE sampling) were promoted to numbered
-> decisions A17–A22. All revisions land **before any implementation has
-> shipped**. Once implementation begins, any further change to a
-> numbered decision requires a major version bump.
+> decisions A17–A22. The earlier post-critique "Phase 0 latency bench"
+> gate was dropped: the adapter is built best-effort on the chosen
+> Python+`websockets` stack and the observed latency is documented in
+> the operations runbook after Phase 2 — we do not block Phase 1 on
+> a synthetic benchmark. All revisions land **before any
+> implementation has shipped**. Once implementation begins, any
+> further change to a numbered decision requires a major version bump.
 
 ### What changed vs v1.0-original
 
 | # | Decision | Change |
 |---|---|---|
-| A1 | Stack | Latency target rewritten with concrete per-hop budgets (was "sub-second"); targets gated on the Phase 0 latency bench in [`ROADMAP.md`](ROADMAP.md). |
+| A1 | Stack | Pinned to Python 3.11+ asyncio + `websockets`; FastAPI / Pydantic / Redis / Numpy moved out of the core import path. No fictional latency numbers in the spec — latency is what the chosen stack delivers; observed numbers go in the operations runbook after Phase 2. |
 | A3 | Outward transport | Embedded Python API is now the primary mode; REST/WS gateway is the optional remote-access mode (extras `[gateway]`). |
 | A3b | Exchange transport (NEW) | Trading and user-data are WebSocket-first; REST is allowed only for bootstrap, reconciliation, and explicit fallback. |
 | A5 | State store | Redis dropped from v1.0 (single-process default uses `asyncio.Queue` + in-process dict cache + `asyncio.Lock`). Redis pub/sub returns later as opt-in extras `[multiproc]`, not as a hard dependency. |
@@ -86,24 +90,17 @@ versioning, independent deployment lifecycle.
 - `FastAPI` + `uvicorn` + `prometheus-client` + `click` are extras
   `[gateway]` and only land on disk if the operator opts into the
   optional HTTP/WS facade (A3 gateway mode).
-- **Latency targets** (operator VPS at 10–30 ms RTT to exchange, warm WS
-  connections, p95). These are *targets*, not measured numbers; they
-  must be validated by the Phase 0 latency bench (see
-  [`ROADMAP.md`](ROADMAP.md)) before Phase 1 begins. If the bench shows
-  the target is unreachable on the chosen stack, this section is
-  rewritten with the observed numbers — not the implementation
-  retro-fit to fictional ones:
-  - `≤ 25 ms` from `place_order()` call to exchange `order ACK`.
-  - `≤ 10 ms` from a private/public WS event arriving on the wire to
-    delivery to an in-process subscriber.
-  - `≤ 5 ms` adapter-added overhead on top of network RTT for any
-    single hop (sign + send, parse + dispatch).
-  - In gateway mode, add one local loopback hop and JSON
-    (de)serialization on top of the embedded numbers.
+- **No fictional latency numbers in this spec.** The adapter is built
+  best-effort on the chosen stack: WebSocket-first transport (A3b),
+  bounded `asyncio.Queue` event bus (A20), audit-log off the hot path
+  (D.1), and rate-limit pre-throttling (A17) ensure the adapter does
+  not add unnecessary overhead on top of the network. Whatever
+  latency Python+`websockets` delivers on the operator's host is what
+  the adapter delivers; observed numbers are documented in the
+  operations runbook after Phase 2 against a real account.
 - HFT-class sub-millisecond latency (kernel bypass, colo, C++/Rust
   hot-path) is explicitly out of scope; the wide-area network is the
-  bottleneck on this stack and the adapter's own overhead is engineered
-  to stay below it.
+  dominant cost on this stack.
 
 ### A2. API key storage: encrypted file
 
@@ -316,23 +313,29 @@ class UniversalSignal:
     venue: str                # "binance_um" | "bybit_linear"
     direction: Direction      # LONG | SHORT
     intent: Intent            # OPEN | ADD | REDUCE | CLOSE | REVERSE
-    sizing: SizingSpec        # {fixed_qty | pct_equity | risk_based}
+    sizing: SizingSpec        # {fixed_qty | notional_usd | pct_equity | risk_based}
     sl: Optional[StopSpec]    # absolute price, bps, ATR multiple, or None
     tp: Optional[StopSpec]
     ttl_seconds: float        # signal expires if not actioned within TTL
     metadata: dict[str, str]  # opaque, never used by logic
 ```
 
-### A11. Sizing: all three modes
+### A11. Sizing: four modes
 
 `SizingSpec` is a tagged union accepting:
 
-- `FixedQty`: literal quantity in base asset (e.g. `qty=0.5`)
-- `PctEquity`: percentage of total equity (e.g. `pct=2.0` → 2%)
-- `RiskBased`: `risk_usd / sl_distance_bps` — sized so a stop-out costs
+- `FixedQty`: literal quantity in base asset (e.g. `qty=0.5`).
+- `NotionalUsd`: literal USD-equivalent notional (e.g. `notional_usd=500.0`).
+  The adapter divides by the cached BBO mid (or last mark) at signal-
+  receipt time and rounds to the venue's `stepSize`. This is the
+  natural mode for UI-driven flows where the operator types a dollar
+  amount.
+- `PctEquity`: percentage of total equity (e.g. `pct=2.0` → 2%).
+- `RiskBased`: `risk_usd / sl_distance_pct` — sized so a stop-out costs
   exactly `risk_usd`. Requires `sl` to be set on the signal.
 
-Only one of the three is set per signal.
+Only one of the four is set per signal. Full payload examples in
+[`SIGNAL_PROTOCOL.md`](SIGNAL_PROTOCOL.md).
 
 ### A12. Risk: emergency kill switch only
 
@@ -708,11 +711,6 @@ The implementation MUST:
 12. Emit an `outcome_report` event for every closed position,
     including realized PnL, fees, slippage, holding time, MFE, and MAE
     (see [`SIGNAL_PROTOCOL.md`](SIGNAL_PROTOCOL.md)).
-13. Validate the A1 latency targets against the operator's host before
-    Phase 1 implementation begins (see Phase 0 in
-    [`ROADMAP.md`](ROADMAP.md)). If observed numbers diverge, A1 is
-    rewritten with the observed numbers and the implementation is
-    sized against reality.
 
 ---
 
@@ -744,6 +742,6 @@ checklist:
 - [ ] Section B — API surface covers required operations.
 - [ ] Section C — prohibitions are exhaustive (including the new
       C.13 dependency-floor and C.14 honest-safety-claims rules).
-- [ ] Section D — requirements are achievable, including the new
-      D.13 latency-bench gate.
+- [ ] Section D — requirements D.1–D.12 are achievable on the chosen
+      stack.
 - [ ] Section E — out-of-scope items are correctly deferred.

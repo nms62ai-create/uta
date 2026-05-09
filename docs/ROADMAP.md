@@ -3,37 +3,16 @@
 ## v1.0 — Initial release (in development)
 
 Core adapter as specified in [`spec_v1.0.md`](spec_v1.0.md). Phases of
-implementation, in dependency order. Phases 1–5 are reordered (vs the
+implementation, in dependency order. Phases 1–4 are reordered (vs the
 original v1.0 roadmap) so the first vertical slice is exactly what the
 embedded consumer (`heatmap-sdk`) needs: WS-trade + market-data
 passthrough on a single venue. The previous "API-first / Bybit-day-one"
 ordering moved gateway-mode and second-venue work into later phases.
-**Phase 0 (latency bench) is gating** — if observed numbers diverge
-from A1, the spec is rewritten before any production code is written.
-
-### Phase 0 — Latency bench (mandatory; gates Phase 1)
-
-A standalone ~150-LOC asyncio script run from the operator's VPS
-against Binance UM testnet (and, optionally, Bybit testnet). No
-dependency on the rest of the adapter — plain `websockets` +
-`time.perf_counter()`.
-
-- [ ] Measure p50 / p95 / p99 of `place_order → ACK` over WS-trade
-      (testnet, warm session, no SL/TP, MARKET) for 10× 1-minute
-      runs.
-- [ ] Measure p50 / p95 / p99 of `book/aggTrade WS event on wire →
-      Python user callback` for the same VPS.
-- [ ] Decompose the two numbers into network-RTT, WS framing,
-      sign+send, parse+dispatch buckets.
-- [ ] Decision: if observed p95 fits A1 budgets (≤25 ms / ≤10 ms /
-      ≤5 ms overhead), proceed to Phase 1. If not, rewrite A1 in
-      [`spec_v1.0.md`](spec_v1.0.md) with the observed numbers and
-      adjust scope (e.g. accept 35–40 ms `place_order → ACK`, or
-      pivot to `uvloop`, or revisit stack choice). The implementation
-      is sized against reality, not against fictional targets.
-- [ ] Land the bench script + raw timing CSVs in
-      `bench/latency_phase0/` so any future stack change can be
-      compared apples-to-apples.
+Latency is treated as best-effort given the chosen Python+`websockets`
+stack — there is no synthetic latency-bench gate before Phase 1; the
+actual numbers are measured on the integrated adapter once Phase 2 can
+place real orders against a real account, and recorded in the
+operations runbook.
 
 ### Phase 1 — Foundation (contract + storage)
 - [ ] `pyproject.toml`, dependencies pinned (core minimal per A1; gateway
@@ -106,19 +85,20 @@ process, no gateway.
       lazy warmup; sync wrapper at `uta.embedded.sync.SyncAdapter`
       for non-async callers (A3 hybrid surface)
 
-### Phase 4 — Latency follow-up + Bybit Linear
+### Phase 4 — Latency observation + Bybit Linear
 
-Once the Binance vertical works against a real $50 account, re-run
-the Phase 0 bench against the *integrated* adapter (rather than the
-standalone harness) so any overhead added by the real code path is
-visible. Then add the second venue.
+Once the Binance vertical works against a real $50 account, take a
+first measurement of `place_order → exchange ACK` and `WS event →
+in-process subscriber` through `uta.embedded.TradeAdapter` so the
+operator has real numbers for capacity-planning and ops-runbook
+purposes. No spec gate — the numbers describe the system, they do
+not block it. Then add the second venue.
 
-- [ ] Integrated latency harness: in-process p50/p95 for
+- [ ] Integrated latency observation: in-process p50/p95 for
       `place_order → exchange ACK`, WS event → in-process subscriber,
       adapter overhead per hop — measured through
       `uta.embedded.TradeAdapter`, not through a private WS client.
-      Update A1 in `spec_v1.0.md` with observed numbers if they
-      diverge from the Phase 0 baseline by more than 20 %.
+      Numbers go into the operations runbook, not into the spec.
 - [ ] `trade_adapter/exchanges/bybit/ws_trade.py` —
       `wss://stream.bybit.com/v5/trade`, `order.create` /
       `order.cancel`, with `stopLoss` / `takeProfit` bundled on entry

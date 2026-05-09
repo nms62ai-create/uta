@@ -607,12 +607,14 @@ Concrete walkthrough of a single signal:
 11. WS broadcaster fans out `position_update` event to all connected
     consumer WS clients.
 
-End-to-end latency targets (decision A1, p95, warm WS, VPS pings
-10–30 ms):
-
-- `place_order()` call → exchange ACK: `≤ 25 ms`.
-- WS event arrival on the wire → in-process subscriber: `≤ 10 ms`.
-- Adapter-added overhead per hop: `≤ 5 ms` on top of network RTT.
+End-to-end latency follows decision A1: best-effort on the chosen
+Python 3.11 + `asyncio` + `websockets` stack. The architecture is
+shaped so the adapter does not add unnecessary cost on top of the
+network — WS-first transport (A3b), audit-log off the hot path (D.1),
+bounded `asyncio.Queue` event bus (A20), rate-limit pre-throttling
+(A17). The actual numbers are measured on the integrated adapter
+against a real account in Phase 4 and recorded in the operations
+runbook; they are not encoded as targets in this document.
 
 Gateway mode adds one local loopback hop and JSON serialization on top
 of the embedded numbers.

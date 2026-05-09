@@ -20,9 +20,10 @@ exposes the same surface to remote consumers.
 > (rate-limit pre-throttling, time sync, cancel-on-disconnect,
 > backpressure, light-strategy disclosure, BBO auto-subscribe) to
 > numbered decisions. Total locked decisions: 23 (A0–A22, including
-> A3b). Implementation begins once Phase 0 (latency bench, see
-> [`docs/ROADMAP.md`](docs/ROADMAP.md)) confirms the A1 budgets are
-> reachable on the operator's host.
+> A3b). Implementation starts at Phase 1 per
+> [`docs/ROADMAP.md`](docs/ROADMAP.md); latency is treated as
+> best-effort given the chosen stack — observed numbers go in the
+> operations runbook after Phase 2, not into the spec as targets.
 
 ---
 
@@ -58,7 +59,7 @@ exposes the same surface to remote consumers.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Блок-за-блоком: embedded API, gateway, Signal Router, Position Manager, Exchange Abstraction, market-data passthrough, in-process event bus, time-sync, rate-limit. |
 | [`docs/SIGNAL_PROTOCOL.md`](docs/SIGNAL_PROTOCOL.md) | Формат `UniversalSignal` (с `correlation_id`), все события, в т.ч. `book_update`/`trade_print`/`bbo_update`/`outcome_report`; `position_update` теперь несёт `liquidation_price`/`unrealized_pnl_usd`/`margin_used_usd`. |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Модель угроз, шифрование ключей, audit log, kill switch. |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | v1.0 / v1.1 / v2.0 — что и когда. Phase 0 (latency bench) обязателен перед Phase 1. |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | v1.0 / v1.1 / v2.0 — что и когда. Старт с Phase 1 (типы + storage + event_bus). |
 
 ---
 
@@ -67,7 +68,7 @@ exposes the same surface to remote consumers.
 | # | Решение | Значение |
 |---|---|---|
 | 0 | Repo | Отдельный (не моно с SDK) |
-| 1 | Stack | Python 3.11+ asyncio + websockets. Core install — 7 wheels, без FastAPI/Redis/Pydantic/Numpy. p95 латентности (target, проверяется в Phase 0): ≤25 ms `place_order` → ACK, ≤10 ms WS-event → подписчик, ≤5 ms адаптерного оверхеда |
+| 1 | Stack | Python 3.11+ asyncio + websockets. Core install — 7 wheels, без FastAPI/Redis/Pydantic/Numpy. Латенси — «что даёт стек» (все выравнивающие решения: WS-first, audit офф hot path, bounded queue, rate-limit pre-throttle); измеряем на интегрированном адаптере в Phase 4, в спеку цифры не пишутся |
 | 2 | API keys | Encrypted file (master password из env) |
 | 3 | Outward transport | Embedded Python API (дефолт) + опциональный REST/WS gateway за `[gateway]` extras |
 | 3b | Exchange transport | WebSocket-first: торговля и user-data по WS. REST — только bootstrap, reconcile, явный fallback |
@@ -78,7 +79,7 @@ exposes the same surface to remote consumers.
 | 8 | SL/TP | Нативные стопы на бирже, отправляются параллельно с ордером входа в одном `place_order`. На Binance UM — `STOP_MARKET closePosition=true` ребёнок шлётся одновременно с входом, без "naked" окна |
 | 9 | Reconnect | Aggressive REST reconciliation, in-process `asyncio.Lock` per venue |
 | 10 | Signal format | `UniversalSignal` dataclass + `correlation_id` (см. протокол) |
-| 11 | Sizing | Fixed qty / % equity / risk-based — все три |
+| 11 | Sizing | Fixed qty / **notional in $** / % equity / risk-based — все четыре (`NotionalUsd` — для UI-сценариев, где оператор задаёт объём в долларах) |
 | 12 | Risk limits | Emergency kill switch only (max notional, max leverage) |
 | 13 | Exchange diff | Полностью прячется за абстракцией |
 | 14 | Testing | Real exchanges + in-process mock-биржа для unit-тестов чистой логики (testnet/paper-runtime по-прежнему out of scope) |
@@ -111,8 +112,6 @@ trade_adapter/
     secrets/              # encrypted keystore
     config.py
     main.py               # entrypoint
-bench/
-    latency_phase0/       # standalone WS-trade / WS-event latency harness (gates Phase 1)
 tests/                    # unit + protocol golden-snapshot
 docs/                     # see Documentation above
 scripts/                  # operational helpers (key-management, db-migrate)
@@ -123,6 +122,5 @@ scripts/                  # operational helpers (key-management, db-migrate)
 ## Next steps
 
 1. Spec review by maintainer.
-2. **Phase 0 latency bench** per [`docs/ROADMAP.md`](docs/ROADMAP.md) — standalone WS-trade / WS-event harness from the operator's VPS; result either confirms the A1 budgets or rewrites them with observed numbers before any production code is written.
-3. Implementation phases 1–4 per [`docs/ROADMAP.md`](docs/ROADMAP.md).
-4. Integration with the embedded `heatmap-sdk` consumer (first real producer; market-data passthrough + `OutcomeReport` feedback).
+2. Implementation phases 1–4 per [`docs/ROADMAP.md`](docs/ROADMAP.md). Phase 1 = `types.py` + storage + event bus + golden-snapshot test; no network, no keys.
+3. Integration with the embedded `heatmap-sdk` consumer (first real producer; market-data passthrough + `OutcomeReport` feedback).
