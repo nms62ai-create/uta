@@ -8,18 +8,52 @@ original v1.0 roadmap) so the first vertical slice is exactly what the
 embedded consumer (`heatmap-sdk`) needs: WS-trade + market-data
 passthrough on a single venue. The previous "API-first / Bybit-day-one"
 ordering moved gateway-mode and second-venue work into later phases.
+**Phase 0 (latency bench) is gating** — if observed numbers diverge
+from A1, the spec is rewritten before any production code is written.
+
+### Phase 0 — Latency bench (mandatory; gates Phase 1)
+
+A standalone ~150-LOC asyncio script run from the operator's VPS
+against Binance UM testnet (and, optionally, Bybit testnet). No
+dependency on the rest of the adapter — plain `websockets` +
+`time.perf_counter()`.
+
+- [ ] Measure p50 / p95 / p99 of `place_order → ACK` over WS-trade
+      (testnet, warm session, no SL/TP, MARKET) for 10× 1-minute
+      runs.
+- [ ] Measure p50 / p95 / p99 of `book/aggTrade WS event on wire →
+      Python user callback` for the same VPS.
+- [ ] Decompose the two numbers into network-RTT, WS framing,
+      sign+send, parse+dispatch buckets.
+- [ ] Decision: if observed p95 fits A1 budgets (≤25 ms / ≤10 ms /
+      ≤5 ms overhead), proceed to Phase 1. If not, rewrite A1 in
+      [`spec_v1.0.md`](spec_v1.0.md) with the observed numbers and
+      adjust scope (e.g. accept 35–40 ms `place_order → ACK`, or
+      pivot to `uvloop`, or revisit stack choice). The implementation
+      is sized against reality, not against fictional targets.
+- [ ] Land the bench script + raw timing CSVs in
+      `bench/latency_phase0/` so any future stack change can be
+      compared apples-to-apples.
 
 ### Phase 1 — Foundation (contract + storage)
-- [ ] `pyproject.toml`, dependencies pinned
+- [ ] `pyproject.toml`, dependencies pinned (core minimal per A1; gateway
+      and multiproc as extras)
 - [ ] `trade_adapter/types.py` — all dataclasses and enums:
       `UniversalSignal` (with `correlation_id`), `OrderRequest`, `Stop`,
-      `OrderUpdate`, `Fill`, `PositionUpdate`, `BookUpdate`,
+      `OrderUpdate`, `Fill`, `PositionUpdate` (with `liquidation_price`
+      / `unrealized_pnl_usd` / `margin_used_usd`), `BookUpdate`,
       `TradePrint`, `BBOUpdate`, `OutcomeReport`
 - [ ] `trade_adapter/config.py` — YAML config loader with env override
 - [ ] `trade_adapter/secrets/keystore.py` — encrypted file, Argon2id KDF
 - [ ] `trade_adapter/storage/sqlite.py` — schema + DAO
-- [ ] `trade_adapter/storage/redis_pubsub.py` — pub/sub + cache
-      (with in-memory fallback)
+- [ ] `trade_adapter/storage/audit_flusher.py` — background batched
+      audit-log writer (D.1; never blocks the accept path)
+- [ ] `trade_adapter/storage/idempotency.py` — in-memory `signal_id`→
+      response cache + SQLite mirror (D.6)
+- [ ] `trade_adapter/bus/event_bus.py` — in-process pub/sub with bounded
+      `asyncio.Queue` per subscriber + drop-oldest backpressure (A20)
+- [ ] `tests/protocol/test_schema_lock.py` — golden-snapshot test
+      that fails on any change to the v1.0 wire shape
 
 ### Phase 2 — Binance USD-M Futures, WebSocket-first (vertical slice)
 
@@ -28,9 +62,16 @@ process, no gateway.
 
 - [ ] `trade_adapter/exchanges/base.py` — abstract `ExchangeAdapter`
       with WS-trade + market-data subscribe methods (A3b, A16)
+- [ ] `trade_adapter/infra/time_sync.py` — server-time offset per
+      venue + drift-guard at startup (A18)
+- [ ] `trade_adapter/infra/rate_limit.py` — token-bucket per
+      `(venue, endpoint_class)`; over-quota → local `RATE_LIMITED` (A17)
 - [ ] `trade_adapter/exchanges/binance/ws_trade.py` —
       `wss://ws-fapi.binance.com/ws-fapi/v1`, `order.place` /
-      `order.cancel` with sign + reply correlation
+      `order.cancel` with sign + reply correlation; SL/TP children
+      shipped in parallel with the entry as `STOP_MARKET
+      closePosition=true` / `TAKE_PROFIT_MARKET closePosition=true`
+      (A8)
 - [ ] `trade_adapter/exchanges/binance/ws_user.py` — listenKey-based
       private stream, reconnect + listenKey refresh
 - [ ] `trade_adapter/exchanges/binance/ws_market.py` — depth +
@@ -38,6 +79,9 @@ process, no gateway.
 - [ ] `trade_adapter/exchanges/binance/rest.py` — bootstrap +
       reconciliation only, every send tagged
       `transport=rest_fallback` if used outside bootstrap (A3b)
+- [ ] `trade_adapter/exchanges/binance/symbols.py` — lazy
+      `register_symbol()` + 24 h refresh of `tickSize` / `stepSize` /
+      `minNotional` (D.8)
 - [ ] `trade_adapter/marketdata/` — coalescing pub/sub layer fed by
       `subscribe_book` / `subscribe_trades` / `subscribe_bbo`; one
       upstream WS per `(venue, symbol)` regardless of subscriber
@@ -45,28 +89,36 @@ process, no gateway.
 
 ### Phase 3 — Core logic + embedded API
 - [ ] `trade_adapter/core/signal_router.py` — validation + intent
-      resolution + sizing, `correlation_id` propagation
+      resolution + sizing, `correlation_id` propagation, idempotency
+      cache lookup (D.6), audit-log enqueue
 - [ ] `trade_adapter/core/position_manager.py` — per-symbol state
-      machine, child SL/TP placed on entry-order ACK (A8), MFE/MAE
-      sampler driven by `marketdata/`
+      machine, child SL/TP shipped in parallel with entry (A8),
+      MFE/MAE sampler driven by `marketdata/` BBO subscription
+      (auto-subscribed for any open position per A22)
 - [ ] `trade_adapter/core/outcome.py` — emits `OutcomeReport` on
-      position close (A8 cancel-on-close + sampler readout)
+      position close (cancel-on-close + sampler readout)
 - [ ] `trade_adapter/core/risk.py` — emergency kill switch
 - [ ] `trade_adapter/core/reconciliation.py` — post-reconnect REST
-      sweep
+      sweep, in-process `asyncio.Lock` per venue
 - [ ] `trade_adapter/embedded/adapter.py` — public `TradeAdapter` API:
       `place_order` / `cancel_order` / `close_position` plus the
-      `subscribe_*` async iterators (A3, A16)
+      `subscribe_*` async iterators (A3, A16); `register_symbol()`
+      lazy warmup; sync wrapper at `uta.embedded.sync.SyncAdapter`
+      for non-async callers (A3 hybrid surface)
 
-### Phase 4 — Latency baseline + Bybit Linear
+### Phase 4 — Latency follow-up + Bybit Linear
 
-Once the Binance vertical works against a real $50 account, lock the
-A1 numbers with measurements and add the second venue.
+Once the Binance vertical works against a real $50 account, re-run
+the Phase 0 bench against the *integrated* adapter (rather than the
+standalone harness) so any overhead added by the real code path is
+visible. Then add the second venue.
 
-- [ ] Latency harness: in-process p50/p95 for
+- [ ] Integrated latency harness: in-process p50/p95 for
       `place_order → exchange ACK`, WS event → in-process subscriber,
-      adapter overhead per hop. Update A1 in `spec_v1.0.md` with
-      observed numbers if they diverge from the targets.
+      adapter overhead per hop — measured through
+      `uta.embedded.TradeAdapter`, not through a private WS client.
+      Update A1 in `spec_v1.0.md` with observed numbers if they
+      diverge from the Phase 0 baseline by more than 20 %.
 - [ ] `trade_adapter/exchanges/bybit/ws_trade.py` —
       `wss://stream.bybit.com/v5/trade`, `order.create` /
       `order.cancel`, with `stopLoss` / `takeProfit` bundled on entry

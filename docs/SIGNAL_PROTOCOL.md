@@ -292,9 +292,17 @@ Producers SHOULD generate stable `signal_id`s and retry on network errors
 with the same `signal_id`. The adapter:
 
 1. On second request with same `signal_id`, returns the cached previous
-   response.
-2. Cache TTL = `signal_ttl_seconds` from config (default 3600).
+   response (same `accepted` flag, same `intent_resolved_to`, same
+   `expected_qty`).
+2. Cache TTL = `signal_idempotency_ttl_seconds` from config
+   (default 3600).
 3. After cache expiry, the same `signal_id` is treated as a new signal.
+
+Implementation (decision A5 + requirement D.6): a bounded in-memory
+`dict[signal_id, CachedResponse]` answers in microseconds on the
+synchronous accept path; a SQLite mirror persists the cache so it
+survives an adapter restart. Reload on startup is one bulk SELECT,
+not per-signal lookups.
 
 This protects against duplicate routing under producer-side retries and
 network blips. It does NOT protect against a producer intentionally
@@ -338,8 +346,29 @@ Event types:
 
 ### `position_update`
 ```json
-{ "type": "position_update", "ts": ..., "data": { "venue": ..., "symbol": ..., "side": "LONG"|"SHORT"|"FLAT", "qty": ..., "entry_price": ..., "state": "OPEN" } }
+{
+  "type": "position_update",
+  "ts": ...,
+  "data": {
+    "venue":            "binance_um",
+    "symbol":           "BTCUSDT",
+    "side":             "LONG" | "SHORT" | "FLAT",
+    "qty":              0.5,
+    "entry_price":      64500.0,
+    "state":            "OPEN",
+    "unrealized_pnl_usd": 142.0,
+    "margin_used_usd":    1612.5,
+    "liquidation_price":  61240.0,
+    "correlation_id":     "5f1d2c3a-..."
+  }
+}
 ```
+
+`unrealized_pnl_usd`, `margin_used_usd`, and `liquidation_price` come
+from the venue's user-data stream (Binance `ACCOUNT_UPDATE`,
+Bybit `position` topic). The adapter does **not** invent them — if
+the venue temporarily omits them (e.g. on a reconnect), the field is
+`null` and a reconcile-driven update arrives shortly after.
 
 ### `alert`
 ```json
@@ -444,9 +473,12 @@ the lifetime of the position so the analytics SDK's MAB can learn.
 }
 ```
 
-MFE / MAE are computed by the adapter sampling mid-price (or BBO if
-opt-in) on every market-data tick during the position's lifetime. The
-sampler runs in-process; no extra exchange call.
+MFE / MAE are computed by the adapter sampling mid-price from the
+BBO stream on every tick during the position's lifetime. The adapter
+automatically subscribes the relevant `(venue, symbol)` BBO channel
+for the duration of any open position (decision A22), so MFE / MAE
+reflect real ticks rather than the position's own fills. The sampler
+runs in-process; no extra exchange call.
 
 ---
 
@@ -456,15 +488,20 @@ The protocol itself is versioned independently of the adapter codebase:
 
 - v1.0 schema is what's documented here.
 - Additive changes (new optional fields, new intents that gracefully
-  degrade) → v1.1, v1.2, ...
+  degrade) → v1.1, v1.2, ... New optional fields default to `None`,
+  never break existing producers.
 - Breaking changes (rename, remove, semantic change) → v2.0.
 
-The adapter advertises its supported protocol version in
-`GET /v1/health`:
+A golden-snapshot test in `tests/protocol/test_schema_lock.py` will
+fail any change to the v1.0 wire shape (field names, types,
+ordering of tagged-union variants) so a casual edit can't
+accidentally bump the protocol. Intentional bumps update both the
+golden file and the table above.
 
-```json
-{ "protocol_version": "1.0", ... }
-```
+The adapter advertises its supported protocol version in both modes:
+
+- Embedded: `uta.PROTOCOL_VERSION` (a module-level string).
+- Gateway: `GET /v1/health` returns `{ "protocol_version": "1.0", ... }`.
 
 Producers SHOULD check this on startup and refuse to send if their
 expected version is incompatible.

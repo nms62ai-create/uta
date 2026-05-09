@@ -101,7 +101,21 @@ gateway for remote consumers.
    │  ┌─────────────────────────────────────────────────────────────┐ │
    │  │  trade_adapter/storage/                                     │ │
    │  │   sqlite.py    schema + migrations + DAO layer              │ │
-   │  │   redis_pubsub.py    internal event fan-out + hot cache     │ │
+   │  │   audit_flusher.py  background batched audit-log writes     │ │
+   │  │   idempotency.py    in-memory `signal_id`→response cache    │ │
+   │  │                     (SQLite mirror, A5 + D.6)               │ │
+   │  └─────────────────────────────────────────────────────────────┘ │
+   │  ┌─────────────────────────────────────────────────────────────┐ │
+   │  │  trade_adapter/bus/                                         │ │
+   │  │   event_bus.py   in-process pub/sub                         │ │
+   │  │     - bounded `asyncio.Queue` per subscriber (A20)          │ │
+   │  │     - drop-oldest backpressure + counter                    │ │
+   │  │     - feeds embedded subscribers + gateway broadcaster      │ │
+   │  └─────────────────────────────────────────────────────────────┘ │
+   │  ┌─────────────────────────────────────────────────────────────┐ │
+   │  │  trade_adapter/infra/                                       │ │
+   │  │   time_sync.py     server-time offset per venue (A18)       │ │
+   │  │   rate_limit.py    token-bucket per (venue, endpoint) (A17) │ │
    │  └─────────────────────────────────────────────────────────────┘ │
    │                                                                  │
    │  ┌─────────────────────────────────────────────────────────────┐ │
@@ -245,7 +259,7 @@ Run after every private-WS reconnect for a venue:
 
 ```python
 async def reconcile(venue, ctx):
-    async with ctx.redis.lock(f"reconcile:{venue}"):
+    async with ctx.locks.reconcile[venue]:        # in-process asyncio.Lock
         exchange_state = await ctx.exchange.fetch_positions_and_orders(venue)
         local_state = await ctx.storage.fetch_state(venue)
         diffs = compute_diffs(exchange_state, local_state)
@@ -253,6 +267,11 @@ async def reconcile(venue, ctx):
             await apply_diff(diff)
             await ctx.events.publish("reconcile_diff", diff)
 ```
+
+v1.0 is single-process per host (D.10), so an in-process lock is
+sufficient. The `[multiproc]` deployment mode reintroduces a
+Redis-backed lock at this point, but that path is not part of the
+v1.0 hot stack.
 
 ### `trade_adapter/exchanges/`
 
@@ -394,18 +413,72 @@ CREATE TABLE reconcile_events (
 All writes go through a thin DAO layer with one `aiosqlite` connection
 serialized via `asyncio.Lock` (SQLite single-writer model).
 
-#### `redis_pubsub.py`
+#### `audit_flusher.py`
 
-Two responsibilities:
-- Pub/sub channels: `events.fill`, `events.order`, `events.position`,
-  `events.alert`. Internal tasks subscribe; WS broadcaster fans out to
-  consumers.
-- Hot cache keys: `mktdata:{venue}:{symbol}:bbo` (best bid/ask, JSON,
-  TTL 5s).
+Background task that drains the in-memory audit-log queue and writes
+rows to SQLite in batches. Synchronous accept path enqueues a row
+and returns; `fsync` happens on the flusher's cadence (default ≤ 1×/s
+or ≥ 64-row batches). The accept path's latency budget never sees
+disk I/O. See decisions A5 and D.1.
 
-If Redis is down, internal events fall back to an in-process
-`asyncio.Queue`. WS broadcaster degrades but doesn't crash. Hot cache
-falls back to direct REST calls (slower).
+#### `idempotency.py`
+
+`signal_id → cached_response` cache (D.6):
+
+- Hot tier: bounded `dict[str, CachedResponse]` (LRU eviction at
+  `signal_idempotency_cache_size`, default 50_000) — answers within
+  microseconds.
+- Cold tier: SQLite mirror so the cache survives an adapter restart.
+  Reload on startup; subsequent writes are also enqueued through the
+  audit flusher (batched, no per-call fsync).
+- TTL: `signal_idempotency_ttl_seconds`, default 3600. Past TTL the
+  same `signal_id` is treated as a new signal.
+
+### `trade_adapter/bus/`
+
+#### `event_bus.py`
+
+In-process publisher / subscriber. One publisher fans events out to
+N bounded `asyncio.Queue` instances (one per subscriber). Channels
+(`fill`, `order_update`, `position_update`, `book_update`,
+`trade_print`, `bbo_update`, `outcome_report`, `alert`,
+`reconcile_diff`, `signal_accepted`, `signal_rejected`) are
+filter-tags on a single bus, not separate brokers.
+
+Backpressure (decision A20):
+
+- Queue is bounded (`maxsize=1024` for market-data channels by
+  default; `8192` for trading-state channels).
+- When full, the **oldest** event for that subscriber is dropped to
+  make room for the newest. The publisher never blocks.
+- A drop increments
+  `uta_event_bus_drops_total{channel, subscriber}` so a slow
+  consumer is always observable.
+
+This is the entire "internal pub/sub" mechanism for v1.0. No Redis,
+no separate broker process, no IPC. The hot market-data cache
+(latest BBO per symbol, last book sequence, funding-rate snapshot)
+is a `dict[(venue, symbol), Snapshot]` guarded by the per-symbol
+`asyncio.Lock` it shares with the position manager.
+
+### `trade_adapter/infra/`
+
+#### `time_sync.py`
+
+Measures server-time offset against each enabled venue at startup
+and on a refresh interval (default 1 h). Signed REST and WS-trade
+requests use `host_now() + venue_offset` for `timestamp` so a
+drifting host clock cannot trip `recvWindow`. If sample drift
+exceeds `±2000 ms`, the adapter emits a `critical` alert and
+refuses to start (A18).
+
+#### `rate_limit.py`
+
+Token-bucket gates per `(venue, endpoint_class)` set below the
+venue's documented limit (A17). Over-quota sends are rejected
+locally with `RATE_LIMITED`; the request never reaches the
+exchange. Bucket capacity and refill rate live in config so the
+operator can tune for elevated-limit accounts.
 
 ### `trade_adapter/secrets/`
 
@@ -437,28 +510,30 @@ The adapter runs as a single asyncio process. Startup sequence:
 ```
 1. Load config (YAML + ENV overrides)
 2. Open SecretStore (prompt or env for master password)
-3. Init SQLite (run migrations)
-4. Init Redis client (with fallback to in-process queue if unreachable)
+3. Init SQLite (run migrations) and reload idempotency cache
+4. Start in-process event bus + audit flusher
 5. For each enabled venue:
-   a. Initialize ExchangeAdapter
-   b. Verify connectivity (REST ping)
-   c. Set position mode = ONE_WAY (idempotent)
-   d. Subscribe to user data WS
-   e. Reconcile state via REST
+   a. Sync server-time offset (A18); abort startup if drift > ±2s
+   b. Initialize ExchangeAdapter
+   c. Verify connectivity (REST ping)
+   d. Set position mode = ONE_WAY (idempotent)
+   e. Subscribe to user data WS
+   f. Reconcile state via REST
 6. Start signal router + position manager tasks
-7. Start FastAPI server (uvicorn)
+7. Start optional FastAPI gateway (only if `[gateway]` extras enabled
+   and gateway is configured to bind a port)
 8. Mark adapter "ready"
 ```
 
 Shutdown sequence (SIGTERM):
 
 ```
-1. Stop accepting new signals (return 503 from POST /v1/signal)
+1. Stop accepting new signals (return 503 from POST /v1/signal
+   in gateway mode; raise AdapterStopping in embedded mode)
 2. Wait up to 5s for in-flight signals to finish routing
 3. Disconnect WS streams (clean close)
-4. Flush pending SQLite writes
-5. Close Redis client
-6. Exit
+4. Drain audit flusher → flush pending SQLite writes
+5. Exit
 ```
 
 The adapter does NOT auto-flatten positions on shutdown. Existing
@@ -475,11 +550,15 @@ dangerous than leaving the position open with a stop.
 - One global `asyncio.Lock` for the SQLite connection (single-writer).
 - One `asyncio.Lock` per venue for "exchange settings setup" (mode
   changes, leverage changes).
-- Reconciliation guarded by Redis-backed lock (in case multiple
-  reconciles fire from rapid reconnects).
+- One `asyncio.Lock` per venue for the post-reconnect reconciliation
+  task (so two rapid reconnects do not run concurrent diffs).
+- The internal event bus uses bounded `asyncio.Queue` per subscriber
+  (A20). The publisher never awaits a slow consumer.
 
-No threads. No multiprocessing. If single-process throughput becomes a
-bottleneck, that's a v2.0 conversation (likely sharding by venue).
+No threads. No multiprocessing. No Redis. If single-process throughput
+becomes a bottleneck, that's a v2.0 conversation (likely sharding by
+venue, and at that point the multi-process bus reappears as a
+`[multiproc]` extras-gated Redis pub/sub).
 
 ---
 
@@ -506,11 +585,16 @@ Concrete walkthrough of a single signal:
    - Generates `client_order_id`.
    - Builds `OrderRequest`, sends to `ExchangeAdapter.place_order`.
 6. `ExchangeAdapter.place_order`:
-   - Rounds qty to step size, price to tick size.
-   - Signs REST request with API key (decrypted from `SecretStore` for
-     this call only).
-   - Sends to exchange.
-   - On 200 OK, persists `client_order_id → exchange_order_id` mapping.
+   - Checks the rate-limit bucket (A17). Over-quota → local
+     `RATE_LIMITED` rejection; never reaches the exchange.
+   - Rounds qty to step size, price to tick size using cached symbol
+     metadata (lazily fetched on first registration; refreshed per D.8).
+   - Signs the request using `host_now() + venue_offset` (A18).
+   - Sends over WS-trade with `client_order_id` for reply correlation.
+     For Binance UM with SL/TP: ships entry **and**
+     `STOP_MARKET closePosition=true` child(ren) in parallel within
+     the same multiplexed batch (A8) so the position is never naked.
+   - On ACK, persists `client_order_id → exchange_order_id` mapping.
    - Returns `OrderAck`.
 7. Position manager updates SQLite: `orders.status = ACK`.
 8. Exchange WS pushes `Fill` event.
@@ -547,8 +631,10 @@ of the embedded numbers.
 | Network timeout on order submit | Retry with same `client_order_id`. After 3 attempts: mark AMBIGUOUS, queue manual reconciliation. |
 | WS disconnect | Auto-reconnect with backoff; trigger reconciliation on success. |
 | SQLite I/O error | Crash the process. State must be intact; restart and recover. |
-| Redis outage | Degrade gracefully; in-memory pub/sub fallback. |
 | Master password wrong | Fail to start; do not run with broken keys. |
+| Server-time drift > ±2s | Refuse to start (A18); emit `critical` alert. |
+| Local rate-limit bucket empty | Reject locally with `RATE_LIMITED`; emit metric (A17). |
+| Slow event-bus subscriber | Drop oldest in that subscriber's queue; emit drop counter (A20). Hot path unaffected. |
 
 ---
 

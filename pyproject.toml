@@ -11,23 +11,35 @@ authors = [{ name = "nms6277" }]
 readme = "README.md"
 license = { text = "Proprietary" }
 
+# Core embedded-mode runtime (decision A3 / A3b). Keep minimal: a heatmap-sdk-class
+# consumer that only wants `import uta` should NOT pull FastAPI / Redis / Pydantic.
+# Anything used purely by the optional gateway (HTTP server, Bearer-token plumbing,
+# CLI, Prometheus exposition, multi-process pub/sub) lives in extras below.
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
     "websockets>=12",
     "httpx>=0.27",
     "aiosqlite>=0.20",
-    "redis>=5.0",
-    "pydantic>=2.6",
     "cryptography>=42",
     "argon2-cffi>=23.1",
     "structlog>=24.1",
-    "prometheus-client>=0.20",
     "PyYAML>=6.0",
-    "click>=8.1",
 ]
 
 [project.optional-dependencies]
+# Optional FastAPI gateway for remote / cross-language consumers (A3 gateway mode).
+# Pulled in only when the operator opts into running the HTTP+WS facade.
+gateway = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "click>=8.1",
+    "prometheus-client>=0.20",
+]
+# Reserved for the future "shared bus across processes" mode (D.10 + multiproc note
+# in spec). Not used by v1.0 single-process default; stays here so consumers can
+# opt in with `pip install universal-trade-adapter[multiproc]` once it ships.
+multiproc = [
+    "redis>=5.0",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
