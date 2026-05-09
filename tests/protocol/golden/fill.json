@@ -1,0 +1,15 @@
+{
+  "client_order_id": "uta-1",
+  "correlation_id": "corr-1",
+  "exchange_order_id": "123456789",
+  "fee_usd": 0.65,
+  "fill_id": "f-1",
+  "is_maker": false,
+  "price": 65000.0,
+  "qty": 0.05,
+  "side": "BUY",
+  "signal_id": "sig-1",
+  "symbol": "BTCUSDT",
+  "ts": 1700000000.0,
+  "venue": "binance_um"
+}

@@ -29,8 +29,12 @@ Modules:
     reconciliation.py   - Post-reconnect REST sweep. For each venue,
                           fetches all positions/orders, diffs against
                           local SQLite, applies corrections, emits
-                          ``reconcile_diff`` events. Wrapped in a
-                          Redis-backed mutex per venue.
+                          ``reconcile_diff`` events. Wrapped in an
+                          in-process ``asyncio.Lock`` per venue
+                          (decision A5/A9, post-cleanup; the
+                          multi-process variant lives in the
+                          ``[multiproc]`` extra and is out of scope
+                          for v1.0).
     intents.py          - ``Intent``, ``IntentResolution``, helper logic
                           to resolve OPEN against existing position.
     sizing.py           - Pure functions converting ``SizingSpec`` to

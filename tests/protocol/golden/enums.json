@@ -1,0 +1,87 @@
+{
+  "CloseReason": [
+    "liquidation",
+    "manual",
+    "reconcile",
+    "signal",
+    "sl",
+    "tp"
+  ],
+  "Direction": [
+    "LONG",
+    "SHORT"
+  ],
+  "EventType": [
+    "alert",
+    "bbo_update",
+    "book_update",
+    "fill",
+    "order_update",
+    "outcome_report",
+    "position_update",
+    "reconcile_diff",
+    "signal_received",
+    "trade_print"
+  ],
+  "Intent": [
+    "ADD",
+    "CLOSE",
+    "OPEN",
+    "REDUCE",
+    "REVERSE"
+  ],
+  "OrderSide": [
+    "BUY",
+    "SELL"
+  ],
+  "OrderStatus": [
+    "ACK",
+    "AMBIGUOUS",
+    "CANCELLED",
+    "EXPIRED",
+    "FILLED",
+    "PARTIALLY_FILLED",
+    "PENDING",
+    "REJECTED"
+  ],
+  "OrderType": [
+    "LIMIT",
+    "MARKET",
+    "STOP_MARKET",
+    "TAKE_PROFIT_MARKET"
+  ],
+  "PositionState": [
+    "ADDING",
+    "CLOSING",
+    "IDLE",
+    "OPEN",
+    "OPENING",
+    "RECONCILING",
+    "REDUCING"
+  ],
+  "RejectionReason": [
+    "DUPLICATE_SIGNAL_ID",
+    "EMERGENCY_LIMIT_EXCEEDED",
+    "INVALID_INTENT",
+    "RATE_LIMITED",
+    "SCHEMA",
+    "SIZING_REQUIRES_SL",
+    "TTL_EXPIRED",
+    "UNKNOWN_SYMBOL",
+    "UNKNOWN_VENUE"
+  ],
+  "StopMode": [
+    "local",
+    "native"
+  ],
+  "TimeInForce": [
+    "FOK",
+    "GTC",
+    "GTX",
+    "IOC"
+  ],
+  "Venue": [
+    "binance_um",
+    "bybit_linear"
+  ]
+}

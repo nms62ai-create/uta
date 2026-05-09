@@ -1,0 +1,27 @@
+{
+  "correlation_id": "00000000-0000-0000-0000-000000000001",
+  "direction": "LONG",
+  "intent": "OPEN",
+  "metadata": {
+    "ui_session": "op-1-2026-05"
+  },
+  "signal_id": "00000000-0000-0000-0000-000000000001",
+  "sizing": {
+    "kind": "notional_usd",
+    "notional_usd": 500.0
+  },
+  "sl": {
+    "kind": "pct",
+    "mode": "native",
+    "pct": 0.5
+  },
+  "source": "heatmap_sdk",
+  "symbol": "BTCUSDT",
+  "tp": {
+    "kind": "pct",
+    "mode": "native",
+    "pct": 1.0
+  },
+  "ttl_seconds": 3.0,
+  "venue": "binance_um"
+}
