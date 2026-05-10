@@ -188,3 +188,92 @@ async def test_async_context_manager_closes_client() -> None:
     # After exit, further requests must fail.
     with pytest.raises(RuntimeError):
         await c.fetch_server_time()
+
+
+# ---- User data stream (listenKey) endpoints ----
+
+
+@respx.mock
+async def test_start_user_data_stream_returns_listen_key(client: BinanceRestClient) -> None:
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["method"] = request.method
+        captured["body"] = request.content.decode("ascii") if request.content else ""
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"listenKey": "abc123"})
+
+    respx.post(f"{DEFAULT_BASE_URL}/fapi/v1/listenKey").mock(side_effect=_capture)
+
+    key = await client.start_user_data_stream()
+    await client.aclose()
+
+    assert key == "abc123"
+    assert captured["method"] == "POST"
+    assert captured["body"] == ""  # unsigned, no body
+    assert "signature" not in captured["url"]
+    assert captured["headers"].get("x-mbx-apikey") == "ak"
+
+
+@respx.mock
+async def test_start_user_data_stream_raises_on_malformed_response(
+    client: BinanceRestClient,
+) -> None:
+    respx.post(f"{DEFAULT_BASE_URL}/fapi/v1/listenKey").mock(
+        return_value=httpx.Response(200, json={"unexpected": "shape"})
+    )
+    with pytest.raises(BinanceHttpError):
+        await client.start_user_data_stream()
+    await client.aclose()
+
+
+@respx.mock
+async def test_keepalive_user_data_stream_sends_put(client: BinanceRestClient) -> None:
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={})
+
+    respx.put(f"{DEFAULT_BASE_URL}/fapi/v1/listenKey").mock(side_effect=_capture)
+
+    await client.keepalive_user_data_stream()
+    await client.aclose()
+
+    assert captured["method"] == "PUT"
+    assert captured["headers"].get("x-mbx-apikey") == "ak"
+
+
+@respx.mock
+async def test_close_user_data_stream_sends_delete(client: BinanceRestClient) -> None:
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={})
+
+    respx.delete(f"{DEFAULT_BASE_URL}/fapi/v1/listenKey").mock(side_effect=_capture)
+
+    await client.close_user_data_stream()
+    await client.aclose()
+
+    assert captured["method"] == "DELETE"
+    # No signature on DELETE listenKey — purely API-key-header authed.
+    assert "signature" not in captured["url"]
+
+
+@respx.mock
+async def test_keepalive_propagates_api_error(client: BinanceRestClient) -> None:
+    """Binance returns -1125 'This listenKey does not exist' on a stale key."""
+    respx.put(f"{DEFAULT_BASE_URL}/fapi/v1/listenKey").mock(
+        return_value=httpx.Response(
+            400, json={"code": -1125, "msg": "This listenKey does not exist."}
+        )
+    )
+    with pytest.raises(BinanceApiError) as ei:
+        await client.keepalive_user_data_stream()
+    await client.aclose()
+    assert ei.value.code == -1125

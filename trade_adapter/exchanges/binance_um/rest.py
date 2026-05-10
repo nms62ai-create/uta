@@ -32,7 +32,12 @@ Out of scope
     - Rate-limit token bucket (deferred to Phase 2c when WS-trade
       tokens are reasoned about uniformly).
     - Ed25519 signing (Phase 2c if user opts in).
-    - Listen-key lifecycle (lives in :mod:`binance_um.user`).
+
+The listen-key REST endpoints (``POST/PUT/DELETE /fapi/v1/listenKey``)
+are exposed here as convenience methods because they reuse the same
+``X-MBX-APIKEY`` header authentication path. The lifecycle orchestrator
+that *uses* them — keepalive cadence, listenKey rotation, WS reconnect
+on expiry — lives in :mod:`binance_um.ws.user_stream`.
 """
 
 from __future__ import annotations
@@ -257,6 +262,38 @@ class BinanceRestClient:
         """``GET /fapi/v2/account`` — balances, margin info."""
 
         return await self.get_signed("/fapi/v2/account")
+
+    # ---- User data stream (listenKey) endpoints ----
+    #
+    # These three endpoints authenticate via the ``X-MBX-APIKEY`` header
+    # only — no HMAC signature, no timestamp, no recvWindow. The
+    # orchestrator that calls them — :class:`..ws.user_stream.UserDataStreamClient` —
+    # owns keepalive cadence and listenKey rotation; this class only
+    # exposes them as raw HTTP calls.
+
+    async def start_user_data_stream(self) -> str:
+        """``POST /fapi/v1/listenKey`` — open a USER_DATA_STREAM.
+
+        Returns the ``listenKey`` string. The key is valid for ~60
+        minutes; callers should ``keepalive_user_data_stream`` every
+        ~30 minutes to extend it.
+        """
+        payload = await self._request(
+            "POST", "/fapi/v1/listenKey", {}, signed=False
+        )
+        if not isinstance(payload, dict) or "listenKey" not in payload:
+            raise BinanceHttpError(
+                f"unexpected listenKey response: {payload!r}"
+            )
+        return str(payload["listenKey"])
+
+    async def keepalive_user_data_stream(self) -> None:
+        """``PUT /fapi/v1/listenKey`` — extend the current listenKey."""
+        await self._request("PUT", "/fapi/v1/listenKey", {}, signed=False)
+
+    async def close_user_data_stream(self) -> None:
+        """``DELETE /fapi/v1/listenKey`` — close the current listenKey."""
+        await self._request("DELETE", "/fapi/v1/listenKey", {}, signed=False)
 
 
 def _decode_response(resp: httpx.Response) -> Any:
