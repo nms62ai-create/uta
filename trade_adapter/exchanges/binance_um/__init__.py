@@ -13,20 +13,26 @@ each transport concern stays self-contained:
                     for ``exchangeInfo``, ``positionRisk``,
                     ``openOrders``, ``account``, ``time``, plus
                     fallback order placement / cancel.
-
-Phase 2b/2c will add:
-
-    transport.py  — WS connect, ping/pong, reconnect with backoff,
-                    request-id router for WS-API responses.
-    trade.py      — WS-API ``order.place`` / ``order.cancel`` / batch.
-    user.py       — USER_DATA_STREAM (listenKey lifecycle,
-                    ORDER_TRADE_UPDATE, ACCOUNT_UPDATE).
-    market.py     — depth, bookTicker, aggTrade.
-    adapter.py    — wires the above into the ``ExchangeAdapter``
-                    contract consumed by the signal router /
-                    position manager (Phase 3).
+    ws/           — WebSocket layer (Phase 2b/2c):
+                    transport.py — WS-API RPC transport.
+                    trade.py     — signed ``order.place`` / ``order.cancel``.
+                    stream.py    — push-only stream transport.
+                    market.py    — combined market-data client.
+                    user_stream.py — USER_DATA_STREAM with listenKey
+                                    lifecycle.
+    adapter.py    — Phase 3a venue glue: lifecycle owner for the four
+                    clients above, ``OrderRequest`` → Binance params
+                    translation, ``order.place`` result → ``OrderAck``.
 """
 
+from .adapter import (
+    BinanceUmAdapter,
+    BinanceUmAdapterClosed,
+    BinanceUmAdapterConfig,
+    BinanceUmAdapterError,
+    BinanceUmAdapterNotStarted,
+    BinanceUmAdapterWrongVenue,
+)
 from .auth import (
     canonical_query_string,
     sign_hmac,
@@ -56,6 +62,12 @@ __all__ = [
     "BinanceHttpError",
     "BinanceRestClient",
     "BinanceRestError",
+    "BinanceUmAdapter",
+    "BinanceUmAdapterClosed",
+    "BinanceUmAdapterConfig",
+    "BinanceUmAdapterError",
+    "BinanceUmAdapterNotStarted",
+    "BinanceUmAdapterWrongVenue",
     "SymbolInfo",
     "SymbolRegistry",
     "canonical_query_string",
