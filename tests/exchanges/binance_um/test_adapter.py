@@ -592,6 +592,94 @@ async def test_submit_propagates_ws_trade_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_market_uses_market_lot_size_when_present() -> None:
+    """Regression: MARKET orders snap to ``MARKET_LOT_SIZE``, not ``LOT_SIZE``.
+
+    Binance validates MARKET-order qty against the ``MARKET_LOT_SIZE``
+    filter, which is allowed to differ from ``LOT_SIZE``. If we round to
+    ``LOT_SIZE`` instead, an otherwise-valid qty (e.g. 2.5 vs. step=1)
+    is sent to the venue and rejected with ``-4014`` ``PRICE_FILTER``.
+    """
+
+    payload: dict[str, Any] = {
+        "symbols": [
+            {
+                "symbol": "BTCUSDT",
+                "baseAsset": "BTC",
+                "quoteAsset": "USDT",
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "pricePrecision": 1,
+                "quantityPrecision": 3,
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                    {
+                        "filterType": "LOT_SIZE",
+                        "stepSize": "0.1",
+                        "minQty": "0.1",
+                        "maxQty": "10000",
+                    },
+                    {
+                        "filterType": "MARKET_LOT_SIZE",
+                        "stepSize": "1",
+                        "minQty": "1",
+                        "maxQty": "100",
+                    },
+                    {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                ],
+            },
+        ]
+    }
+    rest = FakeRest(exchange_info_payload=payload)
+    ws_trade = FakeWsTrade()
+    adapter = _make_adapter(rest=rest, ws_trade=ws_trade)
+    await adapter.start()
+
+    # MARKET: 2.5 snaps to MARKET_LOT_SIZE step=1 -> "2".
+    await adapter.submit_order(
+        _order_request(qty=2.5, order_type=OrderType.MARKET)
+    )
+    # LIMIT: same 2.5 snaps to LOT_SIZE step=0.1 -> "2.5".
+    await adapter.submit_order(
+        _order_request(
+            client_order_id="coid-limit",
+            qty=2.5,
+            order_type=OrderType.LIMIT,
+            price=65000.0,
+        )
+    )
+
+    market_call, limit_call = ws_trade.place_calls
+    assert market_call.params["type"] == "MARKET"
+    assert market_call.params["quantity"] == "2"
+    assert limit_call.params["type"] == "LIMIT"
+    assert limit_call.params["quantity"] == "2.5"
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_market_falls_back_to_lot_size_when_market_filter_absent() -> None:
+    """When ``MARKET_LOT_SIZE`` isn't present, MARKET orders fall back to ``LOT_SIZE``.
+
+    The default fixture has no ``MARKET_LOT_SIZE`` filter, so ``round_market_qty``
+    falls back to ``LOT_SIZE`` (stepSize=0.001) and 0.0015 → "0.001" as before.
+    """
+
+    ws_trade = FakeWsTrade()
+    adapter = _make_adapter(ws_trade=ws_trade)
+    await adapter.start()
+
+    await adapter.submit_order(
+        _order_request(qty=0.0015, order_type=OrderType.MARKET)
+    )
+
+    assert ws_trade.place_calls[0].params["quantity"] == "0.001"
+
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_submit_without_symbol_in_registry_skips_rounding() -> None:
     """Unknown symbols still produce a usable params dict (no float-drift)."""
 

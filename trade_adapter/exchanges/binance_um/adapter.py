@@ -116,9 +116,19 @@ def _decimal_to_plain(d: Decimal) -> str:
 
 
 def _format_qty_for_wire(
-    symbols: SymbolRegistry, symbol: str, qty: float
+    symbols: SymbolRegistry,
+    symbol: str,
+    qty: float,
+    *,
+    order_type: OrderType,
 ) -> str:
-    """Round ``qty`` to ``stepSize`` and render as a Binance-canonical string.
+    """Round ``qty`` to the correct step filter and render as a Binance string.
+
+    Binance validates MARKET orders against the ``MARKET_LOT_SIZE`` filter,
+    which can have a different ``stepSize`` than ``LOT_SIZE``. The other
+    order types (LIMIT / STOP_MARKET / TAKE_PROFIT_MARKET) are validated
+    against ``LOT_SIZE``. ``SymbolRegistry.round_market_qty`` already falls
+    back to ``LOT_SIZE`` when ``MARKET_LOT_SIZE`` is absent.
 
     If the symbol isn't in the registry (e.g. ``load_exchange_info_on_start``
     was disabled in a test), we skip rounding and just stringify via the
@@ -127,6 +137,8 @@ def _format_qty_for_wire(
     """
 
     if symbol in symbols:
+        if order_type is OrderType.MARKET:
+            return _decimal_to_plain(symbols.round_market_qty(symbol, qty))
         return _decimal_to_plain(symbols.round_qty(symbol, qty))
     return _decimal_to_plain(Decimal(repr(qty)))
 
@@ -347,7 +359,10 @@ class BinanceUmAdapter:
             params["closePosition"] = "true"
         else:
             params["quantity"] = _format_qty_for_wire(
-                self.symbols, req.symbol, req.qty
+                self.symbols,
+                req.symbol,
+                req.qty,
+                order_type=req.order_type,
             )
             if req.reduce_only:
                 params["reduceOnly"] = "true"
