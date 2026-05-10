@@ -33,25 +33,64 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote_plus
+
+
+def _decimal_to_plain_string(d: Decimal) -> str:
+    """Render a ``Decimal`` in fixed-point form without scientific notation.
+
+    Strips trailing zeros and a trailing decimal point so ``1.0000`` becomes
+    ``"1"`` (matches Binance's canonical numeric form). ``format(d, 'f')``
+    is the only stdlib way to force fixed-point output for *any* magnitude
+    of ``Decimal`` — ``str(Decimal('1E-8'))`` returns ``'1E-8'`` which the
+    exchange would reject.
+    """
+
+    s = format(d, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s
 
 
 def _format_value(v: Any) -> str:
     """Stringify a single param value as Binance expects.
 
-    - ``bool`` → ``"true"``/``"false"``
-    - ``float`` with no fractional part → integer-looking (e.g. ``1.0`` → ``"1"``)
-    - everything else → ``str(v)``
+    - ``bool``     → ``"true"``/``"false"``
+    - integer-valued numeric (``int``, ``1.0``, ``Decimal('1')``) → ``"1"``
+    - ``float``    → round-tripped via ``Decimal(repr(v))`` so the
+      *shortest* decimal representation is preserved (``0.1`` stays
+      ``"0.1"``, not ``"0.10000000000000000555"``), then expanded via
+      :func:`_decimal_to_plain_string` so small values aren't truncated
+      and no scientific notation is emitted (``0.0000001`` →
+      ``"0.0000001"``, never ``"0"`` or ``"1e-07"``).
+    - ``Decimal``  → same fixed-point rendering as above.
+    - anything else → ``str(v)``.
+
+    ``float('nan')`` / ``float('inf')`` are rejected with ``ValueError``
+    — they can't be serialised into a valid Binance request.
     """
 
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, float):
+        if not math.isfinite(v):
+            raise ValueError(f"cannot format non-finite float for Binance: {v!r}")
         if v.is_integer():
             return str(int(v))
-        # Use repr to avoid scientific notation for small floats.
-        return format(v, "f").rstrip("0").rstrip(".")
+        # ``repr(float)`` returns the shortest decimal string that
+        # round-trips to the same float — e.g. ``repr(0.1) == '0.1'``,
+        # ``repr(1e-8) == '1e-08'``. Decimal accepts both; the subsequent
+        # ``format(d, 'f')`` expands scientific notation to fixed-point.
+        return _decimal_to_plain_string(Decimal(repr(v)))
+    if isinstance(v, Decimal):
+        if not v.is_finite():
+            raise ValueError(f"cannot format non-finite Decimal for Binance: {v!r}")
+        if v == v.to_integral_value():
+            return str(int(v))
+        return _decimal_to_plain_string(v)
     return str(v)
 
 
