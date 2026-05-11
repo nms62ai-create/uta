@@ -514,7 +514,11 @@ async def test_absolute_sl_on_wrong_side_rejects(dao: SqliteDAO) -> None:
 
 async def test_adapter_error_propagates_and_is_not_cached(dao: SqliteDAO) -> None:
     adapter = FakeAdapter(submit_error=RuntimeError("venue boom"))
-    router, _, _, _, bus, cache = await _make_router(dao, adapter=adapter)
+    bus = EventBus()
+    sub = bus.subscribe(EventType.SIGNAL_RECEIVED.value)
+    router, _, _, _, _, cache = await _make_router(
+        dao, adapter=adapter, event_bus=bus
+    )
     sig = _signal()
 
     with pytest.raises(RuntimeError, match="venue boom"):
@@ -522,8 +526,9 @@ async def test_adapter_error_propagates_and_is_not_cached(dao: SqliteDAO) -> Non
 
     # Idempotency was NOT populated (caller can retry).
     assert await cache.get("sig-1") is None
-    # No SIGNAL_RECEIVED event was published.
-    assert bus.subscriber_count(EventType.SIGNAL_RECEIVED.value) == 0
+    # No SIGNAL_RECEIVED event reached a real subscriber — the queue
+    # is the externally observable proxy for "publish was called".
+    assert sub.queue.empty() is True
 
 
 # ---------------------------------------------------------------------------
