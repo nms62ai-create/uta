@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from ..types import OrderAck, OrderRequest, Position, Venue
+from ..types import OrderAck, OrderRequest, Position, PositionUpdate, Venue
 
 
 @runtime_checkable
@@ -75,6 +75,22 @@ class EquityProvider(Protocol):
     def get_equity_usd(self, venue: Venue) -> float | None: ...
 
 
+@runtime_checkable
+class VenueSnapshotProvider(Protocol):
+    """REST snapshot surface the :class:`PositionManager` needs.
+
+    A venue-specific implementation (e.g. ``BinanceVenueSnapshotProvider``)
+    wraps the REST client + REST translators so the position manager
+    stays venue-neutral. The :attr:`venue` field tags the provider so
+    a multi-venue manager (Phase 4 onwards) can dispatch.
+    """
+
+    venue: Venue
+
+    async def fetch_position_snapshot(self) -> list[PositionUpdate]: ...
+    async def fetch_equity_snapshot(self) -> float: ...
+
+
 class NullPositionProvider:
     """No-op :class:`PositionProvider` that always returns ``None``.
 
@@ -92,4 +108,5 @@ __all__ = [
     "MarketDataProvider",
     "NullPositionProvider",
     "PositionProvider",
+    "VenueSnapshotProvider",
 ]
