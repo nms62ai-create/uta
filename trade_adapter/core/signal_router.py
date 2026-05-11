@@ -74,6 +74,7 @@ from .protocols import (
     MarketDataProvider,
     PositionProvider,
 )
+from .risk import RiskDecision, RiskGate
 from .sizing import SizingError, compute_target_qty
 from .stops import StopError, compute_protective_price
 
@@ -107,6 +108,7 @@ class SignalRouter:
         position_provider: PositionProvider,
         equity_provider: EquityProvider | None = None,
         event_bus: EventBus | None = None,
+        risk_gate: RiskGate | None = None,
         clock: Callable[[], float] = _default_clock,
         submit_timeout_s: float | None = None,
     ) -> None:
@@ -116,6 +118,7 @@ class SignalRouter:
         self._position_provider = position_provider
         self._equity_provider = equity_provider
         self._event_bus = event_bus
+        self._risk_gate = risk_gate
         self._clock = clock
         self._submit_timeout_s = submit_timeout_s
 
@@ -224,6 +227,23 @@ class SignalRouter:
                 else OrderSide.BUY
             ),
         )
+
+        # --- Risk gate (kill switch / daily loss / per-symbol caps) -------
+        if self._risk_gate is not None:
+            decision: RiskDecision = self._risk_gate.evaluate(
+                signal,
+                target_qty=plan.qty,
+                reference_price=reference_price,
+            )
+            if not decision.allowed:
+                assert decision.rejection_reason is not None
+                _log.info(
+                    "risk gate denied signal=%s reason=%s detail=%s",
+                    signal.signal_id,
+                    decision.rejection_reason.value,
+                    decision.detail,
+                )
+                return self._reject(signal, decision.rejection_reason)
 
         # --- Submit (raises propagate; idempotency NOT cached on raise) ----
         await self._submit_orders(signal, plan)
