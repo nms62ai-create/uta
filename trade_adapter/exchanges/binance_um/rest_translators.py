@@ -59,18 +59,34 @@ def _float(value: Any, *, field: str, context: str) -> float:
 
 
 def _optional_float(value: Any) -> float | None:
-    """Permissive float coercion — returns ``None`` for ``None`` or unparsable."""
+    """Permissive float coercion — returns ``None`` for ``None`` or unparsable.
+
+    Zero is preserved (a position with breakeven unrealised PnL has a real
+    ``0.0`` reading; collapsing that to ``None`` loses information). Callers
+    that need the "0 means absent" sentinel (e.g. ``liquidationPrice``)
+    should use :func:`_optional_float_nonzero` instead.
+    """
 
     if value is None:
         return None
     try:
-        out = float(value)
+        return float(value)
     except (TypeError, ValueError):
         return None
-    # Binance frequently sends "0" / "0.00000" for fields that are
-    # logically absent (e.g. ``liquidationPrice`` on a flat position);
-    # surface those as ``None`` so consumers can tell "no liquidation"
-    # from "liquidation at zero".
+
+
+def _optional_float_nonzero(value: Any) -> float | None:
+    """Like :func:`_optional_float` but collapses an exact zero to ``None``.
+
+    Binance frequently sends ``"0"`` / ``"0.00000"`` for fields that are
+    logically absent (e.g. ``liquidationPrice`` on a flat position); only
+    apply this helper to fields where zero is documented to be a "not
+    applicable" sentinel.
+    """
+
+    out = _optional_float(value)
+    if out is None:
+        return None
     return out if out != 0 else None
 
 
@@ -129,7 +145,7 @@ def position_risk_to_position_update(
         qty=qty,
         entry_price=entry_price,
         state=state,
-        liquidation_price=_optional_float(row.get("liquidationPrice")),
+        liquidation_price=_optional_float_nonzero(row.get("liquidationPrice")),
         unrealized_pnl_usd=_optional_float(row.get("unRealizedProfit")),
         margin_used_usd=_optional_float(row.get("isolatedMargin")),
         ts=ts,

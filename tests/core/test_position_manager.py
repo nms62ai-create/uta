@@ -510,6 +510,57 @@ async def test_stop_without_start_is_safe() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_reconcile_ignores_other_venues_in_shared_store() -> None:
+    """Regression: a multi-venue store must not have rows from another venue
+    deleted by this manager's reconcile pass. The store is keyed by
+    ``(venue, symbol)`` and the same instance will be shared with the Phase 4
+    Bybit manager — only ``(self._venue, *)`` rows are this manager's
+    responsibility."""
+
+    store = PositionStore()
+    # Pre-load a Bybit row directly (simulates the Bybit manager having
+    # populated it via its own bootstrap).
+    bybit_pos = PositionUpdate(
+        venue=Venue.BYBIT_LINEAR,
+        symbol="ETHUSDT",
+        direction=Direction.LONG,
+        qty=2.0,
+        entry_price=3_000.0,
+        state=PositionState.OPEN,
+        liquidation_price=None,
+        unrealized_pnl_usd=None,
+        margin_used_usd=None,
+        ts=1.0,
+    )
+    store.apply_position_update(bybit_pos)
+
+    snap = FakeSnapshotProvider(
+        positions=[_update(symbol="BTCUSDT", qty=0.5)],
+        equity_usd=10_000.0,
+    )
+    mgr = PositionManager(
+        venue=Venue.BINANCE_UM,
+        store=store,
+        snapshot_provider=snap,
+        reconcile_interval_s=0,
+    )
+    await mgr.start()
+    try:
+        # Reconcile with no Binance-side drift; the Bybit row must remain
+        # untouched and must NOT show up as a "missing_on_venue" diff.
+        summary = await mgr.reconcile_once()
+        bybit_kinds = [
+            d for d in summary.diffs if d.venue == Venue.BYBIT_LINEAR
+        ]
+        assert bybit_kinds == []
+        # Bybit position still present in the shared store.
+        still_there = store.get_position(Venue.BYBIT_LINEAR, "ETHUSDT")
+        assert still_there is not None
+        assert still_there.qty == 2.0
+    finally:
+        await mgr.stop()
+
+
 async def test_store_satisfies_position_provider_after_bootstrap() -> None:
     """End-to-end smoke: store + manager + signal_router can be wired."""
 

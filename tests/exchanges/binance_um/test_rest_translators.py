@@ -105,12 +105,32 @@ def test_unrealized_profit_passes_through() -> None:
     assert update.unrealized_pnl_usd == 123.45
 
 
+def test_unrealized_profit_zero_preserved_not_collapsed_to_none() -> None:
+    """Breakeven PnL is a real reading — must not collapse to ``None``."""
+
+    update = position_risk_to_position_update(
+        _row(positionAmt="0.5", unRealizedProfit="0"), ts=1.0
+    )
+    assert update is not None
+    assert update.unrealized_pnl_usd == 0.0
+
+
 def test_isolated_margin_passes_through() -> None:
     update = position_risk_to_position_update(
         _row(positionAmt="0.5", isolatedMargin="1234.56"), ts=1.0
     )
     assert update is not None
     assert update.margin_used_usd == 1234.56
+
+
+def test_isolated_margin_zero_preserved_for_cross_margin() -> None:
+    """Cross-margin positions report ``isolatedMargin == 0`` — that's data, not absence."""
+
+    update = position_risk_to_position_update(
+        _row(positionAmt="0.5", isolatedMargin="0"), ts=1.0
+    )
+    assert update is not None
+    assert update.margin_used_usd == 0.0
 
 
 def test_missing_symbol_raises() -> None:

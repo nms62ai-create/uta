@@ -174,8 +174,14 @@ class PositionManager:
 
         diffs: list[ReconcileDiff] = []
         snap_by_key = {(p.venue, p.symbol): p for p in snapshot_positions}
+        # The store is multi-venue (Phase 4 will run a second manager for
+        # Bybit against the same store). Restrict the diff set to entries
+        # owned by this manager's venue so we never touch another venue's
+        # rows.
         store_by_key = {
-            (p.venue, p.symbol): p for p in self._store.iter_positions()
+            (p.venue, p.symbol): p
+            for p in self._store.iter_positions()
+            if p.venue == self._venue
         }
 
         for key in snap_by_key.keys() | store_by_key.keys():
