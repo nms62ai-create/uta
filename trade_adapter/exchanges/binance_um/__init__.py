@@ -23,6 +23,13 @@ each transport concern stays self-contained:
     adapter.py    — Phase 3a venue glue: lifecycle owner for the four
                     clients above, ``OrderRequest`` → Binance params
                     translation, ``order.place`` result → ``OrderAck``.
+    snapshot.py   — Phase 3g REST snapshot provider for the
+                    venue-agnostic :class:`VenueSnapshotProvider`
+                    Protocol consumed by :class:`PositionManager`.
+    user_handlers.py — Phase 3g factory that wires the user-data
+                    stream handler dict to a :class:`PositionManager`,
+                    the embedded event bus, and (optionally) the
+                    :class:`RiskState` daily-loss bucket.
 """
 
 from .adapter import (
@@ -48,12 +55,14 @@ from .rest import (
     BinanceRestClient,
     BinanceRestError,
 )
+from .snapshot import BinanceUmSnapshotProvider
 from .symbols import (
     SymbolInfo,
     SymbolRegistry,
     precision_from_step,
     precision_to_step,
 )
+from .user_handlers import make_user_data_handlers
 
 __all__ = [
     "DEFAULT_BASE_URL",
@@ -68,9 +77,11 @@ __all__ = [
     "BinanceUmAdapterError",
     "BinanceUmAdapterNotStarted",
     "BinanceUmAdapterWrongVenue",
+    "BinanceUmSnapshotProvider",
     "SymbolInfo",
     "SymbolRegistry",
     "canonical_query_string",
+    "make_user_data_handlers",
     "precision_from_step",
     "precision_to_step",
     "sign_hmac",
