@@ -22,3 +22,8 @@ secrets.enc
 *.db-wal
 *.db-shm
 .uta/
+
+# launcher artefacts (created by launcher/start.sh|start.bat on first run)
+.env
+/heatmap-sdk/
+uv.lock

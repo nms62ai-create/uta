@@ -1,247 +1,141 @@
-# Local setup: heatmap-sdk + UTA on Binance UM Testnet
+# Local Setup — UTA + heatmap-sdk
 
-A concrete checklist to run heatmap-sdk's UI on your machine with UTA wired
-in as the trade-execution backend. Defaults are picked so a fresh clone
-ends up on Binance USD-M **testnet** — no real money at risk.
+Three steps. The launcher does everything: creates the virtualenv,
+extracts heatmap-sdk, applies the integration patch, installs Python
+dependencies, prompts for your Binance API keys, and starts the
+server with your browser pointed at it.
 
-If you are reading this on the UTA repo, the patch referenced below
-(`heatmap_sdk.patch`) lives next to this file:
-`trade_adapter/integrations/heatmap_sdk/heatmap_sdk.patch`.
-
----
-
-## 0. Prerequisites
-
-- Python 3.11 (heatmap-sdk currently pins this; UTA accepts 3.11+).
-- Either `uv` (recommended; UTA ships a `uv.lock`) or `pip` + `venv`.
-- Binance Futures **Testnet** API key + secret. Get one at
-  <https://testnet.binancefuture.com/> → API Management. The testnet
-  account starts with fake USDT — you cannot lose real money.
-- Account in **one-way (Net)** position mode, not Hedge. UTA's
-  reconciliation logic assumes one-way.
-
----
-
-## 1. Clone both repos side by side
+## 1. Clone the repo
 
 ```bash
-mkdir -p ~/code && cd ~/code
 git clone https://github.com/nms62ai-create/uta.git
-# Replace the heatmap-sdk URL with wherever you keep it locally. The
-# extracted source we developed against lives at
-# /home/ubuntu/repos/heatmap-sdk/extracted/ in the dev VM.
-git clone <heatmap-sdk-url> heatmap-sdk
+cd uta
 ```
 
-Expected layout after this step:
+Heatmap-sdk ships inside this repo as `heatmap-sdk.zip` at the root —
+you do **not** need to clone it separately.
 
+## 2. Run the launcher
+
+### Windows
+
+Double-click `launcher\start.bat`, or from `cmd` / PowerShell:
+
+```bat
+launcher\start.bat
 ```
-~/code/
-  uta/
-  heatmap-sdk/
-```
 
----
-
-## 2. Apply the heatmap-sdk patch
-
-The patch teaches heatmap-sdk's `LiveHeatmapService` to construct a UTA
-stack on connect, pump prices and adaptive signals into it, replace
-the inline `OrderExecutor` with UTA's `TradeAdapter`, and tear it down
-on disconnect. It is gated behind `UTA_ENABLED=1` so heatmap-sdk runs
-unchanged with the flag off.
+### Linux / macOS
 
 ```bash
-cd ~/code/heatmap-sdk
-git apply --check ~/code/uta/trade_adapter/integrations/heatmap_sdk/heatmap_sdk.patch
-git apply         ~/code/uta/trade_adapter/integrations/heatmap_sdk/heatmap_sdk.patch
+bash launcher/start.sh
 ```
 
-The patch is a unified diff. If `git apply` complains about whitespace
-or context drift, try:
+On the **first run** the launcher will:
+
+1. Verify Python 3.11+ is on PATH (`py -3` on Windows, `python3` on Unix).
+2. Create `./.venv` and bootstrap pip inside it.
+3. Extract `heatmap-sdk.zip` to `./heatmap-sdk/`.
+4. Apply `trade_adapter/integrations/heatmap_sdk/heatmap_sdk.patch` to
+   the extracted heatmap-sdk. Uses GNU `patch` if available, otherwise
+   a bundled pure-Python applier so Windows users do not need extra
+   tools.
+5. `pip install -e .` (UTA, editable) and
+   `pip install -r heatmap-sdk/requirements.txt`.
+6. Prompt you for:
+   - `BINANCE_API_KEY` (visible)
+   - `BINANCE_API_SECRET` (hidden)
+   - testnet Y/n (default Y — strongly recommended for the first run)
+   - default trade size $ (default 50)
+   - default Stop-Loss % (default 2)
+   - default Take-Profit % (default 1.5)
+   - autotrade enabled y/N (default N — manual confirm in UI)
+
+   Answers are written to `.env` (mode 0600 on POSIX). On every
+   subsequent run the launcher reads `.env` and skips the prompts.
+7. Launch `uvicorn app.main:app` and open your default browser at
+   `http://127.0.0.1:8000/`.
+
+On **subsequent runs** every step except #7 is a no-op (idempotent),
+so the launcher boots straight into the server.
+
+> Need testnet keys? Sign up at
+> <https://testnet.binancefuture.com/en/>, mint an API key, and set
+> the account to **one-way** position mode (not Hedge).
+
+## 3. Use the UI
+
+1. Wait for the browser tab to load `http://127.0.0.1:8000/`.
+2. Pick a symbol (e.g. `BTCUSDT`) in the controls panel.
+3. Set the **$ notional**, **Stop-Loss %**, **Take-Profit %**,
+   **min confidence** in the autotrade panel.
+4. Click **Connect** → heatmap-sdk subscribes to Binance market
+   streams and UTA wires up REST + WS-trade + USER_DATA_STREAM.
+5. Toggle **Autotrade ON**. The adaptive SDK now feeds signals into
+   UTA; UTA's autotrader gates them (confidence, dedupe, kill-switch,
+   one-position-at-a-time) and forwards survivors as entry orders
+   with parallel SL/TP children.
+6. Toggle **Autotrade OFF** when you want to stop opening new
+   positions. Existing positions remain open — close them by hand
+   in the UI or in Binance, or by clicking **Disconnect** which
+   tears the whole stack down.
+7. Press **Ctrl-C** in the terminal to stop the server. The launcher
+   forwards SIGINT to uvicorn which calls FastAPI shutdown hooks, so
+   the user-data stream and adapter stop cleanly. (If you want a
+   hard exit, press Ctrl-C twice — uvicorn will SIGKILL itself.)
+
+## Useful launcher flags
 
 ```bash
-patch -p1 < ~/code/uta/trade_adapter/integrations/heatmap_sdk/heatmap_sdk.patch
+bash launcher/start.sh --setup           # install only, no server
+bash launcher/start.sh --no-browser      # do not auto-open browser
+bash launcher/start.sh --host 0.0.0.0    # bind on every interface
+bash launcher/start.sh --port 9000       # use a different port
+bash launcher/start.sh --no-prompt       # abort if .env is missing
+bash launcher/start.sh --reset           # wipe .venv + heatmap-sdk
+                                         # (keeps .env)
 ```
 
-The patch adds one new file (`app/uta_bridge.py`) and edits one
-existing file (`app/ws_session.py`).
+`start.bat` accepts the same flags.
 
----
+## Going to mainnet
 
-## 3. Install both packages in one venv
-
-UTA is installed in editable mode so any edit in `~/code/uta/` is
-picked up immediately — no rebuild required.
-
-### Option A: `uv` (recommended)
-
-```bash
-cd ~/code/heatmap-sdk
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install -r requirements.txt
-uv pip install -e ~/code/uta            # editable install of UTA
-```
-
-### Option B: stdlib `venv` + `pip`
-
-```bash
-cd ~/code/heatmap-sdk
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
-pip install -e ~/code/uta               # editable install of UTA
-```
-
-Verify UTA is importable:
-
-```bash
-python -c "from trade_adapter.integrations.heatmap_sdk import bootstrap; print('UTA ok', bootstrap.build_stack.__name__)"
-```
-
----
-
-## 4. Configure environment variables
-
-UTA reads no env vars on its own — they're all consumed by the
-heatmap-sdk bridge added in step 2. Drop them into a `.env` (or export
-them from your shell) before starting heatmap-sdk:
-
-```bash
-# REQUIRED — Binance Futures testnet credentials
-export BINANCE_API_KEY="paste your testnet API key"
-export BINANCE_API_SECRET="paste your testnet API secret"
-
-# REQUIRED — flip the UTA wiring on. Defaults to off so the patch is a no-op.
-export UTA_ENABLED=1
-
-# Optional — testnet on by default. Set to 0 to go to mainnet (USE REAL MONEY).
-export UTA_TESTNET=1
-
-# Optional — where UTA persists its SQLite state (audit log, idempotency
-# cache, schema_meta). Pick a writable path; ":memory:" works for a
-# single-run smoke test but loses idempotency replay protection across restarts.
-export UTA_DB_PATH=./uta_state.db
-
-# Optional — default sizing for autotrade. The user can still override
-# these from the heatmap-sdk UI's risk panel; these are the bootstrap
-# defaults applied to every connect.
-export UTA_DEFAULT_NOTIONAL_USD=50
-export UTA_DEFAULT_SL_PCT=0.02     # 2.0% stop loss
-export UTA_DEFAULT_TP_PCT=0.015    # 1.5% take profit
-export UTA_AUTOTRADE_ENABLED=0     # 0 = manual confirm, 1 = auto-execute
-
-# Optional — which exchange's adaptive signal drives autotrade?
-# "binance" (default) or "bybit". Heatmap-sdk listens to both feeds;
-# this picks which one is treated as the entry signal for UTA.
-export UTA_SIGNAL_SOURCE=binance
-```
-
-If `UTA_ENABLED` is unset or `0`, the patched heatmap-sdk behaves
-exactly like the unpatched version — UTA is bypassed entirely.
-
----
-
-## 5. Run heatmap-sdk
-
-```bash
-cd ~/code/heatmap-sdk
-source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Then open <http://localhost:8000> in a browser.
-
-You should see log lines like:
+In `.env`, change:
 
 ```
-INFO     heatmap-uta stack started (testnet=True, db=./uta_state.db)
-INFO     uta_bridge: autotrade defaults notional=$50 SL=2.0% TP=1.5% enabled=False
+UTA_TESTNET=0
+BINANCE_API_KEY=<mainnet key>
+BINANCE_API_SECRET=<mainnet secret>
 ```
 
-If you don't see these, `UTA_ENABLED` is unset or the patch wasn't
-applied — UTA is not wired in.
+…or delete `.env` and re-run the launcher to be prompted again.
 
----
+> Walk the testnet path end-to-end **at least once** before pointing
+> a mainnet account at this. All 554 unit tests use mocks; real
+> Binance integration bugs (auth headers, listenKey rotation,
+> symbol-filter rounding edge cases, WS reconnect under real network
+> conditions, race between adaptive-signal frequency and UTA's
+> submit-lock) only show up against the live exchange.
 
-## 6. Smoke test on testnet
-
-1. Pick a liquid symbol (e.g. `BTCUSDT`), set compression `1`, click **Connect**.
-2. Wait for the order-book / heatmap to populate (a few seconds).
-3. Click **Start heatmap**. You should see the live feed.
-4. In the UI's risk panel, set notional / SL / TP if you want to
-   override the env defaults, then flip **Autotrade** on.
-5. Wait for an adaptive signal (`SELL_EXHAUSTION` or `BUY_EXHAUSTION`)
-   with confidence above the entry filter threshold. The log should
-   show one line per signal:
-
-   ```
-   INFO    HeatmapAutoTrader.on_adaptive_signal: forwarded LONG  symbol=BTCUSDT notional=50
-   INFO    TradeAdapter.submit_signal accepted signal_id=… venue=binance_um symbol=BTCUSDT
-   INFO    binance_um.ws_trade.order.place client_order_id=… → exchange_order_id=…
-   ```
-
-6. Check <https://testnet.binancefuture.com/en/futures/BTCUSDT> →
-   **Open Orders** / **Positions**: the order placed by UTA should appear there.
-
-If nothing happens after a few minutes, check:
-
-- Did you flip autotrade on in the UI? (Default is off.)
-- Are signals firing at all? The UI shows the latest signal in the
-  assistant snapshot.
-- Are your API key + secret correct? UTA logs the raw Binance error
-  envelope on submit failure.
-
----
-
-## 7. Tear down
-
-- **Ctrl-C** in the uvicorn terminal: stops the server cleanly. The
-  patch wires `stack.stop()` into FastAPI's shutdown handler so UTA
-  flushes the audit log, closes the WS-trade connection, and deletes
-  the listenKey before exiting.
-- **Disconnect** in the UI: tears down the current connect's UTA
-  stack but keeps the server running. Reconnecting builds a fresh one.
-
-The SQLite file at `UTA_DB_PATH` survives across restarts. Delete it
-manually if you want a clean slate (idempotency cache included).
-
----
-
-## 8. Going to mainnet
-
-Once testnet works and you have read [`INTEGRATION.md`](INTEGRATION.md)
-end-to-end:
-
-```bash
-export UTA_TESTNET=0
-export BINANCE_API_KEY="…mainnet…"
-export BINANCE_API_SECRET="…mainnet…"
-# Optional but recommended for first mainnet run:
-export UTA_DEFAULT_NOTIONAL_USD=20   # smaller test trade
-export UTA_AUTOTRADE_ENABLED=0       # require manual confirm
-```
-
-UTA's risk gate (`RiskConfig` → daily-loss cap + per-symbol qty cap +
-kill switch) is on by default. To override the defaults, pass a
-custom `risk_config` to `bootstrap.build_stack` — see
-`trade_adapter/core/risk.py` for the available knobs.
-
----
-
-## 9. Troubleshooting
+## Troubleshooting
 
 | Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| `ImportError: trade_adapter` | UTA not installed in heatmap-sdk's venv | `pip install -e ~/code/uta` while heatmap-sdk's `.venv` is active |
-| `ModuleNotFoundError: aiosqlite` | UTA's optional deps not installed | `pip install aiosqlite` or use the `uv pip install -e ~/code/uta[dev]` extra |
-| `BinanceAuthError: -2014 API-key format invalid` | Wrong env vars or copied a spot-API key | Re-paste from <https://testnet.binancefuture.com/> → API Management |
-| Stack starts but no orders fire | Autotrade off, or signal confidence below threshold | Check UI risk panel; check `entry_filter` log lines |
-| `RiskKillSwitchEngaged` | The kill switch tripped (e.g. daily-loss cap hit) | Call `stack.reset_kill_switch()` from a debug shell, or restart |
-| Submit fails with `-2019 Margin is insufficient` | Testnet wallet too small, or notional too large | Reduce `UTA_DEFAULT_NOTIONAL_USD`, or top up the testnet wallet from the faucet |
+|---|---|---|
+| `[launcher] ERROR: Python 3.11+ not found on PATH.` | No Python or too old. | Install Python 3.11+ from <https://www.python.org/downloads/>, tick "Add to PATH" on Windows. |
+| `BinanceAuthError` on connect | Wrong key/secret, or testnet key used against mainnet (or vice-versa). | Verify `BINANCE_API_KEY` / `BINANCE_API_SECRET` in `.env` and that `UTA_TESTNET` matches the key's environment. |
+| `One-way position mode required` | Binance account is in Hedge mode. | Switch to one-way mode in the Binance UI (Futures → Preferences → Position Mode). |
+| `Task was destroyed but it is pending!` warnings on Ctrl-C | Server didn't get a chance to drain. | Press Ctrl-C once and wait up to ~10 s; the launcher forwards SIGINT and uvicorn tears down the user-data stream + adapter cleanly. |
+| `patch ... corrupt patch` | Custom edits in `./heatmap-sdk/` conflict with the bundled patch. | Run `launcher/start.sh --reset` to wipe `./heatmap-sdk/` and let the launcher re-extract a clean copy. |
+| Port 8000 already in use | Something else is bound on the port. | Pass `--port 9000` (or any free port) to the launcher. |
 
-If anything else surfaces, grep the UTA logs for the `correlation_id`
-that heatmap-sdk's UI shows in the order-status row — every UTA log
-line tagged with that id traces the full signal→order→ack path.
+## What the launcher does NOT do
+
+- **Close open positions on stop.** Toggling autotrade off prevents
+  new entries but leaves running positions intact. Close them
+  manually in the UI or in Binance.
+- **Auto-update.** It does not `git pull` or refresh dependencies.
+  When you `git pull`, re-run the launcher — pip is a no-op if all
+  packages are already at the right versions, otherwise it installs
+  what's missing.
+- **Run on Python 3.10 or older.** The check is strict because UTA
+  uses 3.11 syntax (union types, `Self`, etc.).
