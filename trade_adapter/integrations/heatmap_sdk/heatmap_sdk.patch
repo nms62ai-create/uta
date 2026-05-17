@@ -1,0 +1,354 @@
+diff --git a/app/uta_bridge.py b/app/uta_bridge.py
+new file mode 100644
+index 0000000..60ea353
+--- /dev/null
++++ b/app/uta_bridge.py
+@@ -0,0 +1,249 @@
++"""Bridge between heatmap-sdk's LiveHeatmapService and UTA's TradeAdapter.
++
++This module is the *only* place heatmap-sdk imports anything UTA-shaped.
++Everything is gated behind the ``UTA_ENABLED`` env var so the rest of
++heatmap-sdk runs unchanged when UTA is not configured.
++
++See ``trade_adapter/integrations/heatmap_sdk/LOCAL_SETUP.md`` in the
++UTA repo for the full setup checklist.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++from typing import Any
++
++_log = logging.getLogger(__name__)
++
++
++def is_enabled() -> bool:
++    """Return ``True`` iff the env tells us to wire UTA in.
++
++    Reading this in one place keeps the rest of heatmap-sdk free of
++    ``os.environ`` lookups and makes it trivial to mock in tests.
++    """
++
++    return os.environ.get("UTA_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
++
++
++def _bool_env(name: str, default: bool) -> bool:
++    raw = os.environ.get(name)
++    if raw is None:
++        return default
++    return raw.lower() in {"1", "true", "yes", "on"}
++
++
++def _float_env(name: str, default: float) -> float:
++    raw = os.environ.get(name)
++    if raw is None or raw == "":
++        return default
++    try:
++        return float(raw)
++    except ValueError:
++        _log.warning("ignoring non-numeric %s=%r, using %s", name, raw, default)
++        return default
++
++
++class UtaBridge:
++    """Per-connect UTA stack + helpers wired to heatmap-sdk's session.
++
++    One instance is constructed in ``LiveHeatmapService._connect_symbol``
++    and stays alive until ``_disconnect_market`` tears it down. The
++    instance owns the UTA stack lifecycle: callers don't need to worry
++    about ``start()`` / ``stop()`` themselves.
++    """
++
++    def __init__(self, stack: Any, *, symbol: str, signal_source: str) -> None:
++        self._stack = stack
++        self._symbol = symbol
++        self._signal_source = signal_source.lower()
++        self._last_signal_id: str | None = None
++
++    @property
++    def stack(self) -> Any:
++        return self._stack
++
++    @property
++    def symbol(self) -> str:
++        return self._symbol
++
++    @property
++    def signal_source(self) -> str:
++        """Which exchange's adaptive feed drives autotrade: 'binance' or 'bybit'."""
++
++        return self._signal_source
++
++    def on_market_trade(
++        self, exchange: str, symbol: str, price: float
++    ) -> None:
++        """Forward a market-trade tick from heatmap-sdk to UTA.
++
++        UTA's SignalRouter needs a recent reference price per
++        (venue, symbol) to resolve dollar-notional sizing at submit
++        time. We feed every tick on the symbol we're attached to.
++        """
++
++        if exchange.lower() != self._signal_source:
++            # We only need to resolve sizing on the venue we're
++            # submitting orders to. Bybit ticks are ignored when
++            # UTA_SIGNAL_SOURCE=binance and vice versa.
++            return
++        if symbol.upper() != self._symbol:
++            return
++        try:
++            self._stack.on_market_trade(self._symbol, float(price))
++        except Exception:  # pragma: no cover - defensive
++            _log.exception("uta_bridge.on_market_trade failed")
++
++    async def forward_signal(self, exchange: str, signal: Any) -> None:
++        """Forward an adaptive_sdk ``Signal`` to UTA's autotrader.
++
++        ``signal`` is whatever ``AdaptiveMarketService.on_agg_trade`` /
++        ``latest_signal`` returned. We dedupe on ``signal_id`` so the
++        autotrader sees each adaptive signal exactly once even if
++        heatmap-sdk re-broadcasts the same one from the frame loop.
++        """
++
++        if exchange.lower() != self._signal_source:
++            return
++        if signal is None:
++            return
++        signal_id = getattr(signal, "signal_id", None)
++        if signal_id is None or signal_id == self._last_signal_id:
++            return
++        self._last_signal_id = signal_id
++        try:
++            await self._stack.on_adaptive_signal(signal)
++        except Exception:  # pragma: no cover - defensive
++            _log.exception(
++                "uta_bridge.forward_signal failed signal_id=%s", signal_id
++            )
++
++    def update_settings_from_payload(self, payload: dict[str, Any]) -> None:
++        """Map heatmap-sdk's risk-panel payload onto UTA's autotrade settings.
++
++        Keys we look at:
++        - ``notional_usd`` / ``trade_notional_usd`` — dollar volume per trade
++        - ``sl_pct`` / ``stop_loss_pct`` — stop-loss % from entry
++        - ``tp_pct`` / ``take_profit_pct`` — take-profit % from entry
++        - ``autotrade_enabled`` / ``auto_trade_enabled`` — bool flag
++
++        Missing keys are left untouched on the existing settings.
++        """
++
++        try:
++            from trade_adapter.integrations.heatmap_sdk.autotrader import (
++                AutotradeSettings,
++            )
++        except Exception:  # pragma: no cover - defensive
++            return
++
++        current = self._stack.autotrader.settings or AutotradeSettings(
++            notional_usd=_float_env("UTA_DEFAULT_NOTIONAL_USD", 50.0),
++            sl_pct=_float_env("UTA_DEFAULT_SL_PCT", 0.02),
++            tp_pct=_float_env("UTA_DEFAULT_TP_PCT", 0.015),
++            enabled=_bool_env("UTA_AUTOTRADE_ENABLED", False),
++        )
++        notional = payload.get("notional_usd", payload.get("trade_notional_usd"))
++        sl = payload.get("sl_pct", payload.get("stop_loss_pct"))
++        tp = payload.get("tp_pct", payload.get("take_profit_pct"))
++        enabled = payload.get(
++            "autotrade_enabled", payload.get("auto_trade_enabled")
++        )
++        new = AutotradeSettings(
++            notional_usd=float(notional) if notional is not None else current.notional_usd,
++            sl_pct=float(sl) if sl is not None else current.sl_pct,
++            tp_pct=float(tp) if tp is not None else current.tp_pct,
++            enabled=bool(enabled) if enabled is not None else current.enabled,
++        )
++        self._stack.update_settings(new)
++
++    async def stop(self) -> None:
++        """Tear down the UTA stack. Idempotent."""
++
++        try:
++            await self._stack.stop()
++        except Exception:  # pragma: no cover - defensive
++            _log.exception("uta_bridge.stop failed")
++
++
++async def build_for_symbol(
++    symbol: str,
++    *,
++    broadcast: Any,
++) -> UtaBridge | None:
++    """Build a wired :class:`UtaBridge` for ``symbol``, or ``None`` if disabled.
++
++    ``broadcast`` is heatmap-sdk's ``LiveHeatmapService.broadcast`` —
++    the async callable that pushes JSON to every connected browser.
++    We hand it to UTA's :class:`HeatmapEventBroadcaster` so order
++    acks / fills / risk events show up in the UI alongside the
++    existing heatmap frames.
++    """
++
++    if not is_enabled():
++        return None
++
++    api_key = os.environ.get("BINANCE_API_KEY")
++    api_secret = os.environ.get("BINANCE_API_SECRET")
++    if not api_key or not api_secret:
++        _log.warning(
++            "UTA_ENABLED=1 but BINANCE_API_KEY/SECRET missing; UTA disabled"
++        )
++        return None
++
++    try:
++        from trade_adapter.integrations.heatmap_sdk.autotrader import (
++            AutotradeSettings,
++        )
++        from trade_adapter.integrations.heatmap_sdk.bootstrap import (
++            HeatmapUtaConfig,
++            build_stack,
++        )
++    except Exception:  # pragma: no cover - defensive
++        _log.exception("UTA import failed; UTA disabled")
++        return None
++
++    settings = AutotradeSettings(
++        notional_usd=_float_env("UTA_DEFAULT_NOTIONAL_USD", 50.0),
++        sl_pct=_float_env("UTA_DEFAULT_SL_PCT", 0.02),
++        tp_pct=_float_env("UTA_DEFAULT_TP_PCT", 0.015),
++        enabled=_bool_env("UTA_AUTOTRADE_ENABLED", False),
++    )
++    config = HeatmapUtaConfig(
++        api_key=api_key,
++        api_secret=api_secret,
++        testnet=_bool_env("UTA_TESTNET", True),
++        db_path=os.environ.get("UTA_DB_PATH", "./uta_state.db"),
++        autotrade_settings=settings,
++    )
++    signal_source = os.environ.get("UTA_SIGNAL_SOURCE", "binance").lower()
++    if signal_source not in {"binance", "bybit"}:
++        _log.warning(
++            "ignoring UTA_SIGNAL_SOURCE=%r, defaulting to 'binance'", signal_source
++        )
++        signal_source = "binance"
++
++    stack = await build_stack(config, auto_start=True)
++    try:
++        stack.attach_browser_sender(broadcast)
++    except Exception:  # pragma: no cover - defensive
++        _log.exception("attach_browser_sender failed; tearing down UTA")
++        await stack.stop()
++        return None
++    _log.info(
++        "uta_bridge: autotrade defaults notional=$%s SL=%s%% TP=%s%% enabled=%s",
++        settings.notional_usd,
++        settings.sl_pct * 100,
++        settings.tp_pct * 100,
++        settings.enabled,
++    )
++    return UtaBridge(stack, symbol=symbol.upper(), signal_source=signal_source)
++
++
++__all__ = [
++    "UtaBridge",
++    "build_for_symbol",
++    "is_enabled",
++]
+diff --git a/app/ws_session.py b/app/ws_session.py
+index e30010f..9586b53 100644
+--- a/app/ws_session.py
++++ b/app/ws_session.py
+@@ -27,6 +27,7 @@ from app.settings import (
+     HEATMAP_RECENTER_MARGIN_LEVELS,
+ )
+ from app.trade_buffer import TradeBuffer
++from app.uta_bridge import UtaBridge, build_for_symbol as build_uta_bridge
+ 
+ 
+ class BrowserSession:
+@@ -202,6 +203,7 @@ class LiveHeatmapService:
+         self.current_position: PositionState | None = None
+         self._last_position_poll_ms: int = 0
+         self._last_assistant_broadcast_ms: int = 0
++        self.uta_bridge: UtaBridge | None = None
+         self.frame_task: asyncio.Task | None = None
+         self.connections: set[WebSocket] = set()
+         self._lock = asyncio.Lock()
+@@ -216,6 +218,10 @@ class LiveHeatmapService:
+     async def handle_websocket_command(self, command: dict[str, Any]) -> None:
+         event = await self.session.handle_command(command)
+         if command.get("type") == "set_assistant_settings":
++            if self.uta_bridge is not None:
++                self.uta_bridge.update_settings_from_payload(
++                    command.get("settings") or {}
++                )
+             self._apply_assistant_market_settings()
+         await self.broadcast(event)
+ 
+@@ -255,7 +261,20 @@ class LiveHeatmapService:
+             self.exit_engine = ExitEngine()
+             self.position_tracker = PositionTracker(symbol)
+             account_settings = load_binance_account_settings()
+-            if account_settings.has_credentials:
++            self.uta_bridge = await build_uta_bridge(symbol, broadcast=self.broadcast)
++            if self.uta_bridge is not None:
++                # UTA owns order execution; the legacy OrderExecutor path is
++                # bypassed. BinanceAccountClient is still constructed (if
++                # credentials are present) because heatmap-sdk's exit_engine
++                # uses it for position polling; UTA's own position_manager
++                # runs in parallel and drives the autotrader's idempotency.
++                self.account_client = (
++                    BinanceAccountClient(account_settings)
++                    if account_settings.has_credentials
++                    else None
++                )
++                self.order_executor = None
++            elif account_settings.has_credentials:
+                 self.account_client = BinanceAccountClient(account_settings)
+                 self.order_executor = OrderExecutor(self.account_client)
+             else:
+@@ -318,6 +337,11 @@ class LiveHeatmapService:
+         self.frame_task = None
+ 
+     async def _disconnect_market(self) -> None:
++        if self.uta_bridge is not None:
++            try:
++                await self.uta_bridge.stop()
++            finally:
++                self.uta_bridge = None
+         try:
+             if self.client is not None:
+                 await self.client.stop()
+@@ -342,13 +366,31 @@ class LiveHeatmapService:
+     def _on_market_trade(self, trade: dict[str, Any]) -> None:
+         if self.adaptive_market is None:
+             return
+-        self.adaptive_market.on_agg_trade(trade)
++        signal = self.adaptive_market.on_agg_trade(trade)
++        if self.uta_bridge is not None:
++            symbol = self.session.symbol or ""
++            price = float(trade.get("p") or trade.get("price") or 0.0)
++            if price > 0.0:
++                self.uta_bridge.on_market_trade("binance", symbol, price)
++            if signal is not None:
++                asyncio.create_task(
++                    self.uta_bridge.forward_signal("binance", signal)
++                )
+         self._schedule_assistant_snapshot()
+ 
+     def _on_bybit_market_trade(self, trade: dict[str, Any]) -> None:
+         if self.bybit_adaptive_market is None:
+             return
+-        self.bybit_adaptive_market.on_agg_trade(trade)
++        signal = self.bybit_adaptive_market.on_agg_trade(trade)
++        if self.uta_bridge is not None:
++            symbol = self.session.symbol or ""
++            price = float(trade.get("p") or trade.get("price") or 0.0)
++            if price > 0.0:
++                self.uta_bridge.on_market_trade("bybit", symbol, price)
++            if signal is not None:
++                asyncio.create_task(
++                    self.uta_bridge.forward_signal("bybit", signal)
++                )
+         self._schedule_assistant_snapshot()
+ 
+     def _on_book_update(self, book: OrderBook, event_time_ms: int | None) -> None:
