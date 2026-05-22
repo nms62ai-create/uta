@@ -49,6 +49,12 @@ from .core.position_manager import PositionManager
 from .core.protocols import ExchangeAdapter
 from .core.risk import RiskGate, RiskState
 from .core.signal_router import SignalRouter
+from .marketdata import (
+    BboTracker,
+    MarketDataHub,
+    MarketDataSubscription,
+    PositionBboSnapshot,
+)
 from .types import EventType, Position, SignalAck, UniversalSignal, Venue
 
 _log = logging.getLogger(__name__)
@@ -82,6 +88,8 @@ class TradeAdapter:
         position_manager: PositionManager | None = None,
         risk_state: RiskState | None = None,
         risk_gate: RiskGate | None = None,
+        market_data_hub: MarketDataHub | None = None,
+        auto_bbo_tracker: BboTracker | None = None,
     ) -> None:
         self._venue = venue
         self._exchange_adapter = exchange_adapter
@@ -90,6 +98,8 @@ class TradeAdapter:
         self._position_manager = position_manager
         self._risk_state = risk_state
         self._risk_gate = risk_gate
+        self._market_data_hub = market_data_hub
+        self._auto_bbo_tracker = auto_bbo_tracker
 
         self._started = False
         self._closed = False
@@ -123,17 +133,42 @@ class TradeAdapter:
             if self._started:
                 return
             await self._call_lifecycle(self._exchange_adapter, "start")
-            if self._position_manager is not None:
-                try:
+            try:
+                if self._market_data_hub is not None:
+                    await self._market_data_hub.start()
+                if self._position_manager is not None:
                     await self._position_manager.start()
-                except Exception:
-                    # Roll back the venue start so the caller can
-                    # rebuild cleanly. ``close`` is idempotent and
-                    # best-effort.
-                    await self._call_lifecycle(
-                        self._exchange_adapter, "close"
-                    )
-                    raise
+                # The BBO tracker subscribes to POSITION_UPDATE events
+                # on the bus and auto-opens / closes BBO subscriptions
+                # in response. It must come up after the position
+                # manager so the bootstrap snapshot has already been
+                # applied to the store (we don't want to flood the hub
+                # with subscribes for positions that were just about
+                # to be loaded).
+                if self._auto_bbo_tracker is not None:
+                    await self._auto_bbo_tracker.start()
+            except Exception:
+                # Roll back partial start so the caller can rebuild
+                # cleanly. ``close`` is idempotent and best-effort.
+                if self._auto_bbo_tracker is not None:
+                    try:
+                        await self._auto_bbo_tracker.close()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                if self._position_manager is not None:
+                    try:
+                        await self._position_manager.stop()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                if self._market_data_hub is not None:
+                    try:
+                        await self._market_data_hub.close()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                await self._call_lifecycle(
+                    self._exchange_adapter, "close"
+                )
+                raise
             self._started = True
             _log.info("TradeAdapter started venue=%s", self._venue.value)
 
@@ -148,11 +183,21 @@ class TradeAdapter:
         if self._closed:
             return
         self._closed = True
+        if self._auto_bbo_tracker is not None:
+            try:
+                await self._auto_bbo_tracker.close()
+            except Exception as e:  # pragma: no cover - defensive
+                _log.warning("auto_bbo_tracker close error: %s", e)
         if self._position_manager is not None:
             try:
                 await self._position_manager.stop()
             except Exception as e:  # pragma: no cover - defensive
                 _log.warning("position_manager stop error: %s", e)
+        if self._market_data_hub is not None:
+            try:
+                await self._market_data_hub.close()
+            except Exception as e:  # pragma: no cover - defensive
+                _log.warning("market_data_hub close error: %s", e)
         try:
             await self._call_lifecycle(self._exchange_adapter, "close")
         except Exception as e:  # pragma: no cover - defensive
@@ -210,6 +255,89 @@ class TradeAdapter:
             event_type.value if isinstance(event_type, EventType) else event_type
         )
         return self._event_bus.subscribe(topic, queue_size=queue_size)
+
+    # ------------------------------------------------------------------
+    # Market-data passthrough (A.1)
+    # ------------------------------------------------------------------
+
+    async def subscribe_book(
+        self,
+        symbol: str,
+        *,
+        venue: Venue | None = None,
+        queue_size: int | None = None,
+    ) -> MarketDataSubscription:
+        """Async-iterable feed of :class:`BookUpdate` for ``(venue, symbol)``.
+
+        ``venue`` defaults to the adapter's primary venue. Requires a
+        :class:`MarketDataHub` to be wired at construction; otherwise
+        raises :class:`TradeAdapterError`. The hub coalesces multiple
+        local subscribers onto one upstream WS (decision A16 / spec
+        prohibition C.11).
+        """
+
+        return await self._hub_subscribe(
+            "subscribe_book", venue, symbol, queue_size
+        )
+
+    async def subscribe_trades(
+        self,
+        symbol: str,
+        *,
+        venue: Venue | None = None,
+        queue_size: int | None = None,
+    ) -> MarketDataSubscription:
+        """Async-iterable feed of :class:`TradePrint` for ``(venue, symbol)``."""
+
+        return await self._hub_subscribe(
+            "subscribe_trades", venue, symbol, queue_size
+        )
+
+    async def subscribe_bbo(
+        self,
+        symbol: str,
+        *,
+        venue: Venue | None = None,
+        queue_size: int | None = None,
+    ) -> MarketDataSubscription:
+        """Async-iterable feed of :class:`BBOUpdate` for ``(venue, symbol)``."""
+
+        return await self._hub_subscribe(
+            "subscribe_bbo", venue, symbol, queue_size
+        )
+
+    def get_bbo_snapshot(
+        self, symbol: str, *, venue: Venue | None = None
+    ) -> PositionBboSnapshot | None:
+        """Read the per-position BBO envelope (if a :class:`BboTracker` is wired).
+
+        Returns ``None`` for symbols without an open position or before
+        the first tick arrives. Consumers building OutcomeReports (A.2)
+        read this on position close to derive MFE / MAE.
+        """
+
+        if self._auto_bbo_tracker is None:
+            return None
+        target_venue = venue if venue is not None else self._venue
+        return self._auto_bbo_tracker.get_snapshot(target_venue, symbol)
+
+    async def _hub_subscribe(
+        self,
+        method_name: str,
+        venue: Venue | None,
+        symbol: str,
+        queue_size: int | None,
+    ) -> MarketDataSubscription:
+        self._ensure_running()
+        if self._market_data_hub is None:
+            raise TradeAdapterError(
+                f"{method_name} requires a MarketDataHub at construction time"
+            )
+        target_venue = venue if venue is not None else self._venue
+        hub_method = getattr(self._market_data_hub, method_name)
+        return await hub_method(
+            target_venue, symbol, queue_size=queue_size
+        )
 
     # ------------------------------------------------------------------
     # Read-only introspection
@@ -297,6 +425,14 @@ class TradeAdapter:
     @property
     def signal_router(self) -> SignalRouter:
         return self._signal_router
+
+    @property
+    def market_data_hub(self) -> MarketDataHub | None:
+        return self._market_data_hub
+
+    @property
+    def auto_bbo_tracker(self) -> BboTracker | None:
+        return self._auto_bbo_tracker
 
     # ------------------------------------------------------------------
     # Async context manager
