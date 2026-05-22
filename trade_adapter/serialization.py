@@ -207,6 +207,26 @@ def fill_to_wire(f: T.Fill) -> dict[str, Any]:
     }
 
 
+def fill_from_wire(d: dict[str, Any]) -> T.Fill:
+    """Inverse of :func:`fill_to_wire`."""
+
+    return T.Fill(
+        fill_id=d["fill_id"],
+        client_order_id=d["client_order_id"],
+        exchange_order_id=d["exchange_order_id"],
+        venue=T.Venue(d["venue"]),
+        symbol=d["symbol"],
+        side=T.OrderSide(d["side"]),
+        qty=float(d["qty"]),
+        price=float(d["price"]),
+        fee_usd=float(d["fee_usd"]),
+        is_maker=bool(d["is_maker"]),
+        ts=float(d["ts"]),
+        signal_id=d.get("signal_id"),
+        correlation_id=d.get("correlation_id"),
+    )
+
+
 def position_update_to_wire(p: T.PositionUpdate) -> dict[str, Any]:
     return {
         "venue": p.venue.value,
@@ -222,6 +242,36 @@ def position_update_to_wire(p: T.PositionUpdate) -> dict[str, Any]:
         "signal_id": p.signal_id,
         "correlation_id": p.correlation_id,
     }
+
+
+def position_update_from_wire(d: dict[str, Any]) -> T.PositionUpdate:
+    """Inverse of :func:`position_update_to_wire`.
+
+    Used by in-process bus consumers that prefer the dataclass shape
+    (e.g. :class:`BboTracker`, :class:`OutcomeEmitter`) while keeping
+    the publish path serialised so the gateway adapter can forward
+    the same payloads on its WS feed without re-serialising.
+    """
+
+    liquidation_price = d.get("liquidation_price")
+    unrealized = d.get("unrealized_pnl_usd")
+    margin_used = d.get("margin_used_usd")
+    return T.PositionUpdate(
+        venue=T.Venue(d["venue"]),
+        symbol=d["symbol"],
+        direction=T.Direction(d["direction"]),
+        qty=float(d["qty"]),
+        entry_price=float(d["entry_price"]),
+        state=T.PositionState(d["state"]),
+        liquidation_price=(
+            None if liquidation_price is None else float(liquidation_price)
+        ),
+        unrealized_pnl_usd=(None if unrealized is None else float(unrealized)),
+        margin_used_usd=(None if margin_used is None else float(margin_used)),
+        ts=float(d["ts"]),
+        signal_id=d.get("signal_id"),
+        correlation_id=d.get("correlation_id"),
+    )
 
 
 def book_update_to_wire(b: T.BookUpdate) -> dict[str, Any]:

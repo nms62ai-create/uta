@@ -11,6 +11,7 @@ import pytest
 from trade_adapter.bus.event_bus import EventBus
 from trade_adapter.marketdata import BboTracker, MarketDataHub, StreamKind
 from trade_adapter.marketdata.types import StreamCallback
+from trade_adapter.serialization import position_update_to_wire
 from trade_adapter.types import (
     BBOUpdate,
     Direction,
@@ -266,3 +267,64 @@ async def test_close_is_idempotent() -> None:
     await tracker.close()
     await tracker.close()  # no exception
     await hub.close()
+
+
+async def test_tracker_accepts_wire_form_position_updates() -> None:
+    """A.1 production bug fix: the bus publishes wire-form dicts (see
+    :func:`position_update_to_wire`), not Python dataclasses. The
+    tracker must coerce these via :func:`position_update_from_wire`."""
+
+    tracker, bus, provider, hub = await _make_stack()
+    await tracker.start()
+    try:
+        bus.publish(
+            EventType.POSITION_UPDATE.value,
+            position_update_to_wire(_position_update(qty=1.0)),
+        )
+        await _wait_for(lambda: provider.subscribe_calls == 1)
+        assert tracker.get_snapshot(Venue.BINANCE_UM, "BTCUSDT") is not None
+
+        bus.publish(
+            EventType.POSITION_UPDATE.value,
+            position_update_to_wire(
+                _position_update(qty=0.0, state=PositionState.IDLE)
+            ),
+        )
+        await _wait_for(lambda: provider.unsubscribe_calls == 1)
+    finally:
+        await tracker.close()
+        await hub.close()
+
+
+async def test_tracker_drops_malformed_dict_events_without_crashing() -> None:
+    tracker, bus, provider, hub = await _make_stack()
+    await tracker.start()
+    try:
+        # Missing required keys — should be dropped, not raised.
+        bus.publish(EventType.POSITION_UPDATE.value, {"foo": "bar"})
+        # And then a well-formed dict still gets processed.
+        bus.publish(
+            EventType.POSITION_UPDATE.value,
+            position_update_to_wire(_position_update(qty=1.0)),
+        )
+        await _wait_for(lambda: provider.subscribe_calls == 1)
+        assert tracker.is_started
+    finally:
+        await tracker.close()
+        await hub.close()
+
+
+async def test_tracker_drops_unknown_event_types_without_crashing() -> None:
+    tracker, bus, _provider, hub = await _make_stack()
+    await tracker.start()
+    try:
+        # Some unrelated payload type ends up on the topic; tracker
+        # must ignore it rather than crash the supervisor.
+        bus.publish(EventType.POSITION_UPDATE.value, 42)
+        bus.publish(EventType.POSITION_UPDATE.value, "string-event")
+        # Give the supervisor time to process.
+        await asyncio.sleep(0.05)
+        assert tracker.is_started
+    finally:
+        await tracker.close()
+        await hub.close()

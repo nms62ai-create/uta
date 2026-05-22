@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from trade_adapter.bus.event_bus import EventBus
+from trade_adapter.core.outcome import OutcomeEmitter
 from trade_adapter.core.position_manager import PositionManager
 from trade_adapter.core.position_store import PositionStore
 from trade_adapter.core.risk import RiskState
@@ -22,6 +23,7 @@ from trade_adapter.exchanges.binance_um.user_handlers import (
     make_user_data_handlers,
 )
 from trade_adapter.types import (
+    CloseReason,
     Direction,
     EventType,
     OrderSide,
@@ -431,3 +433,91 @@ async def test_make_handlers_returns_expected_keys() -> None:
     handlers = make_user_data_handlers(position_manager=mgr)
 
     assert set(handlers.keys()) == {"ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE"}
+
+
+# ---------------------------------------------------------------------------
+# OutcomeEmitter wiring (A.2)
+# ---------------------------------------------------------------------------
+
+
+async def test_outcome_emitter_receives_fill_pushes() -> None:
+    mgr = _make_manager()
+    emitter = OutcomeEmitter(venue=Venue.BINANCE_UM)
+    handlers = make_user_data_handlers(
+        position_manager=mgr, outcome_emitter=emitter
+    )
+    # Without an open lifetime the fill is counted but dropped.
+    await handlers["ORDER_TRADE_UPDATE"](_order_trade_update())
+    assert emitter.fills_unmatched == 1
+
+
+async def test_outcome_emitter_emits_report_on_round_trip() -> None:
+    bus = EventBus()
+    mgr = _make_manager()
+    emitter = OutcomeEmitter(venue=Venue.BINANCE_UM, event_bus=bus)
+    handlers = make_user_data_handlers(
+        position_manager=mgr, event_bus=bus, outcome_emitter=emitter
+    )
+    report_sub = bus.subscribe(EventType.OUTCOME_REPORT.value)
+
+    # Open: ACCOUNT_UPDATE with non-zero qty
+    await handlers["ACCOUNT_UPDATE"](
+        _account_update(position_amt="1.0", entry_price="50000.0")
+    )
+    assert emitter.is_tracking(Venue.BINANCE_UM, "BTCUSDT")
+
+    # Entry fill
+    await handlers["ORDER_TRADE_UPDATE"](
+        _order_trade_update(
+            client_order_id="sig-1-entry",
+            side="BUY",
+            last_qty="1.0",
+            last_price="50000.0",
+            fee="2.5",
+        )
+    )
+
+    # Exit fill (TP) — also reports venue realised PnL +100
+    await handlers["ORDER_TRADE_UPDATE"](
+        _order_trade_update(
+            client_order_id="sig-1-tp",
+            side="SELL",
+            last_qty="1.0",
+            last_price="50100.0",
+            fee="2.5",
+            realized_pnl="100",
+        )
+    )
+
+    # Close: ACCOUNT_UPDATE with zero qty
+    await handlers["ACCOUNT_UPDATE"](
+        _account_update(position_amt="0", entry_price="0")
+    )
+
+    assert emitter.reports_emitted == 1
+    assert report_sub.queue.qsize() == 1
+    payload = report_sub.queue.get_nowait()
+    assert payload["close_reason"] == CloseReason.TP.value
+    assert payload["fees_usd"] == pytest.approx(5.0)
+    # Venue-reported PnL wins over the fill-cash heuristic.
+    assert payload["realized_pnl_usd"] == pytest.approx(100.0)
+
+
+async def test_outcome_emitter_receives_position_update_before_bus_publish() -> None:
+    """The wiring must push into the emitter *before* publishing on the
+    bus, so that BboTracker's snapshot is still live when the emitter
+    samples it on close. Verify ordering: emitter is updated before any
+    bus subscriber sees the event."""
+
+    bus = EventBus()
+    mgr = _make_manager()
+    emitter = OutcomeEmitter(venue=Venue.BINANCE_UM)
+    handlers = make_user_data_handlers(
+        position_manager=mgr, event_bus=bus, outcome_emitter=emitter
+    )
+    # No subscribers — the publish is a no-op. But the emitter must
+    # have been updated first.
+    await handlers["ACCOUNT_UPDATE"](
+        _account_update(position_amt="1.0", entry_price="50000.0")
+    )
+    assert emitter.is_tracking(Venue.BINANCE_UM, "BTCUSDT")

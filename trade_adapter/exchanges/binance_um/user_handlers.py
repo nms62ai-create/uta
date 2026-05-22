@@ -28,6 +28,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ...bus.event_bus import EventBus
+from ...core.outcome import OutcomeEmitter
 from ...core.position_manager import PositionManager
 from ...core.risk import RiskState
 from ...serialization import (
@@ -60,6 +61,7 @@ def make_user_data_handlers(
     position_manager: PositionManager,
     event_bus: EventBus | None = None,
     risk_state: RiskState | None = None,
+    outcome_emitter: OutcomeEmitter | None = None,
 ) -> dict[str, EventHandler]:
     """Return the ``handlers`` dict for :class:`UserDataStreamClient`.
 
@@ -87,6 +89,13 @@ def make_user_data_handlers(
         Optional. When given, realised-PnL deltas from
         ``ORDER_TRADE_UPDATE`` fills are added to the daily bucket so
         the daily-loss cap (Phase 3f) can trip on its own.
+    outcome_emitter:
+        Optional. When given, every fill and position update is also
+        pushed into the emitter (A.2) so per-position
+        :class:`OutcomeReport` payloads can be produced on close. Push
+        happens *before* the matching bus publish so the BBO snapshot
+        held by :class:`BboTracker` is still live at the moment the
+        emitter samples it.
     """
 
     venue = position_manager.venue
@@ -118,22 +127,28 @@ def make_user_data_handlers(
         if fill is None:
             return
         position_manager.apply_fill(fill)
+        if outcome_emitter is not None:
+            outcome_emitter.apply_fill(fill)
         if event_bus is not None:
             event_bus.publish(EventType.FILL.value, fill_to_wire(fill))
         # Realised PnL is on the order sub-object as ``rp``. Per Binance
         # docs it is per-trade (not cumulative); 0 on non-closing fills,
         # signed (negative = loss) on closing fills. Skip the 0 case so
         # we don't pollute the bucket with zero-deltas.
-        if risk_state is not None:
-            o = frame.get("o") or {}
-            rp_raw = o.get("rp")
-            if rp_raw is not None:
-                try:
-                    pnl = float(rp_raw)
-                except (TypeError, ValueError):
-                    pnl = 0.0
-                if pnl != 0.0:
-                    risk_state.record_realized_pnl(venue, pnl)
+        o = frame.get("o") or {}
+        rp_raw = o.get("rp")
+        pnl: float | None = None
+        if rp_raw is not None:
+            try:
+                pnl = float(rp_raw)
+            except (TypeError, ValueError):
+                pnl = 0.0
+        if risk_state is not None and pnl is not None and pnl != 0.0:
+            risk_state.record_realized_pnl(venue, pnl)
+        if outcome_emitter is not None and pnl is not None and pnl != 0.0:
+            outcome_emitter.record_realized_pnl(
+                fill.venue, fill.symbol, pnl
+            )
 
     async def on_account_update(frame: dict[str, Any]) -> None:
         try:
@@ -147,6 +162,11 @@ def make_user_data_handlers(
             return
         for u in updates:
             position_manager.apply_position_update(u)
+            # Outcome push happens before the bus publish so the BBO
+            # snapshot held by ``BboTracker`` is still live when the
+            # emitter samples it on close.
+            if outcome_emitter is not None:
+                outcome_emitter.apply_position_update(u)
             if event_bus is not None:
                 event_bus.publish(
                     EventType.POSITION_UPDATE.value,
