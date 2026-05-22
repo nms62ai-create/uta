@@ -45,6 +45,7 @@ import logging
 from typing import Any
 
 from .bus.event_bus import EventBus, Subscription
+from .core.outcome import OutcomeEmitter
 from .core.position_manager import PositionManager
 from .core.protocols import ExchangeAdapter
 from .core.risk import RiskGate, RiskState
@@ -90,6 +91,7 @@ class TradeAdapter:
         risk_gate: RiskGate | None = None,
         market_data_hub: MarketDataHub | None = None,
         auto_bbo_tracker: BboTracker | None = None,
+        outcome_emitter: OutcomeEmitter | None = None,
     ) -> None:
         self._venue = venue
         self._exchange_adapter = exchange_adapter
@@ -100,6 +102,7 @@ class TradeAdapter:
         self._risk_gate = risk_gate
         self._market_data_hub = market_data_hub
         self._auto_bbo_tracker = auto_bbo_tracker
+        self._outcome_emitter = outcome_emitter
 
         self._started = False
         self._closed = False
@@ -433,6 +436,10 @@ class TradeAdapter:
     @property
     def auto_bbo_tracker(self) -> BboTracker | None:
         return self._auto_bbo_tracker
+
+    @property
+    def outcome_emitter(self) -> OutcomeEmitter | None:
+        return self._outcome_emitter
 
     # ------------------------------------------------------------------
     # Async context manager

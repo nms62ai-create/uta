@@ -27,6 +27,7 @@ import logging
 from dataclasses import dataclass
 
 from ..bus.event_bus import EventBus, Subscription
+from ..serialization import position_update_from_wire
 from ..types import (
     BBOUpdate,
     EventType,
@@ -175,8 +176,10 @@ class BboTracker:
         assert self._subscription is not None
         try:
             async for event in self._subscription:
-                if isinstance(event, PositionUpdate):
-                    await self._handle_position_update(event)
+                pu = _coerce_position_update(event)
+                if pu is None:
+                    continue
+                await self._handle_position_update(pu)
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover - defensive
@@ -263,6 +266,35 @@ class BboTracker:
                 key[1],
                 e,
             )
+
+
+def _coerce_position_update(event: object) -> PositionUpdate | None:
+    """Accept either a :class:`PositionUpdate` dataclass or its wire-form dict.
+
+    In production the user-data handler publishes the wire-form (a
+    plain ``dict``) on the bus so the same payload can be forwarded
+    by the future gateway WS feed without re-serialising. The
+    in-process tracker prefers the typed dataclass and coerces here.
+    Tests that publish dataclasses directly continue to work
+    unchanged.
+    """
+
+    if isinstance(event, PositionUpdate):
+        return event
+    if isinstance(event, dict):
+        try:
+            return position_update_from_wire(event)
+        except (KeyError, ValueError, TypeError) as e:
+            _log.warning(
+                "BboTracker dropping malformed POSITION_UPDATE dict: %s",
+                e,
+            )
+            return None
+    _log.warning(
+        "BboTracker dropping unrecognised POSITION_UPDATE event type: %s",
+        type(event).__name__,
+    )
+    return None
 
 
 __all__ = ["BboTracker", "PositionBboSnapshot"]
