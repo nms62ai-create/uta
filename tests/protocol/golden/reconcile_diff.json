@@ -1,0 +1,10 @@
+{
+  "detail": {
+    "local_qty": "0.05",
+    "remote_qty": "0.04"
+  },
+  "kind": "qty_mismatch",
+  "symbol": "BTCUSDT",
+  "ts": 1700000000.0,
+  "venue": "binance_um"
+}

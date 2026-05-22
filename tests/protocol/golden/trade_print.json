@@ -1,0 +1,9 @@
+{
+  "price": 65000.0,
+  "qty": 0.123,
+  "side": "SELL",
+  "symbol": "BTCUSDT",
+  "trade_id": "987654321",
+  "ts": 1700000000.234,
+  "venue": "binance_um"
+}

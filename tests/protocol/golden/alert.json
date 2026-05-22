@@ -1,0 +1,8 @@
+{
+  "code": "WS_RECONNECT",
+  "message": "reconnected after 3 attempts",
+  "severity": "warning",
+  "symbol": null,
+  "ts": 1700000000.0,
+  "venue": "binance_um"
+}

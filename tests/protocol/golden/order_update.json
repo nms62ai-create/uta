@@ -1,0 +1,13 @@
+{
+  "avg_fill_price": 65000.0,
+  "client_order_id": "uta-1",
+  "correlation_id": "corr-1",
+  "exchange_order_id": "123456789",
+  "filled_qty": 0.05,
+  "rejection_reason": null,
+  "signal_id": "sig-1",
+  "status": "FILLED",
+  "symbol": "BTCUSDT",
+  "ts": 1700000000.0,
+  "venue": "binance_um"
+}

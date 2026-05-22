@@ -1,0 +1,8 @@
+{
+  "accepted": true,
+  "correlation_id": "corr-1",
+  "duplicate": false,
+  "rejection_reason": null,
+  "signal_id": "sig-1",
+  "ts": 1700000000.0
+}
