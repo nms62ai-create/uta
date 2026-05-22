@@ -14,8 +14,8 @@ gateway for remote consumers.
 ```
         In-process embedded consumers              Remote consumers
    ┌──────────────┐  ┌──────────────┐         ┌──────────────────┐
-   │ heatmap-sdk  │  │ Adaptive SDK │         │ External bot /   │
-   │ + UI         │  │ (numpy core) │         │ other-language   │
+   │ Manual UI    │  │ Strategy bot │         │ External bot /   │
+   │ (any script) │  │ (numpy core) │         │ other-language   │
    └──────┬───────┘  └──────┬───────┘         └────────┬─────────┘
           │ method calls    │ method calls              │ HTTPS / WSS
           │ + async iters   │ + async iters             │ Bearer token

@@ -229,15 +229,15 @@ during routing (e.g. due to retry queueing), it is rejected with
 }
 ```
 
-### Heatmap-sdk UI: $-notional + %-stops
+### External UI: $-notional + %-stops
 
 Operator chose `BTCUSDT` on Binance UM, set `$500` trade size,
-`SL = 0.5%`, `TP = 1.0%`, then heatmap-sdk's analytics fired BUY:
+`SL = 0.5%`, `TP = 1.0%`, then the strategy fired BUY:
 
 ```json
 {
   "signal_id": "...",
-  "source": "heatmap_sdk",
+  "source": "external_ui",
   "symbol": "BTCUSDT",
   "venue": "binance_um",
   "direction": "LONG",

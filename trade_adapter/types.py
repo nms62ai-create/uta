@@ -1,10 +1,11 @@
 """Wire-protocol types.
 
 Pure dataclasses + enums. No I/O, no logic. Every type that travels
-between a producer (heatmap-sdk, manual UI, external bot) and the
-adapter — and every event the adapter publishes back — is defined
-here. The shape is locked by `tests/protocol/test_schema_lock.py`;
-any change to a field name or kind-tag is a v1.0 protocol break.
+between a producer (a UI, a strategy bot, any external script) and
+the adapter — and every event the adapter publishes back — is
+defined here. The shape is locked by
+`tests/protocol/test_schema_lock.py`; any change to a field name or
+kind-tag is a v1.0 protocol break.
 
 Decisions referenced (see ``docs/spec_v1.0.md``):
 

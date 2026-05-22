@@ -15,7 +15,7 @@
     "mode": "native",
     "pct": 0.5
   },
-  "source": "heatmap_sdk",
+  "source": "external_ui",
   "symbol": "BTCUSDT",
   "tp": {
     "kind": "pct",

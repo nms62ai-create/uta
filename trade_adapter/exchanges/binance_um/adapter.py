@@ -30,8 +30,8 @@ What this layer does NOT do (deferred)
 * Maintain a position cache or reconcile against the venue
   (Phase 3e).
 * Apply risk gates (Phase 3f).
-* Expose the public ``TradeAdapter`` API used by heatmap-sdk and other
-  consumers (Phase 3g).
+* Expose the public ``TradeAdapter`` API used by external consumers
+  (Phase 3g).
 """
 
 from __future__ import annotations

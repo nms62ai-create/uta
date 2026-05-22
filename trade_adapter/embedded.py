@@ -1,12 +1,12 @@
 """Phase 3g: embedded :class:`TradeAdapter` public API (decision A3).
 
-The single, stable surface that producers — heatmap-sdk, channel bots,
-manual-trading UIs, anything else — use to drive UTA. Composes the
-Phase 3 pieces (venue adapter, signal router, position manager, risk
-gate, event bus) behind a small lifecycle (``start`` / ``close``),
-synchronous reads, and a single submission method that returns a typed
-:class:`SignalAck`. Producers never reach into the lower layers
-directly.
+The single, stable surface that producers — strategy bots,
+manual-trading UIs, any external script — use to drive UTA. Composes
+the Phase 3 pieces (venue adapter, signal router, position manager,
+risk gate, event bus) behind a small lifecycle (``start`` /
+``close``), synchronous reads, and a single submission method that
+returns a typed :class:`SignalAck`. Producers never reach into the
+lower layers directly.
 
 Lifecycle
 ---------

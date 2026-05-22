@@ -4,10 +4,10 @@
 
 Core adapter as specified in [`spec_v1.0.md`](spec_v1.0.md). Phases of
 implementation, in dependency order. Phases 1–4 are reordered (vs the
-original v1.0 roadmap) so the first vertical slice is exactly what the
-embedded consumer (`heatmap-sdk`) needs: WS-trade + market-data
-passthrough on a single venue. The previous "API-first / Bybit-day-one"
-ordering moved gateway-mode and second-venue work into later phases.
+original v1.0 roadmap) so the first vertical slice is exactly what an
+embedded consumer needs: WS-trade + market-data passthrough on a
+single venue. The previous "API-first / Bybit-day-one" ordering moved
+gateway-mode and second-venue work into later phases.
 Latency is treated as best-effort given the chosen Python+`websockets`
 stack — there is no synthetic latency-bench gate before Phase 1; the
 actual numbers are measured on the integrated adapter once Phase 2 can

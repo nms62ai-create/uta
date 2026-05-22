@@ -21,7 +21,7 @@ def _sample() -> Secrets:
             "binance_um": ExchangeKey(api_key="ak1", api_secret="as1", label="main"),
             "bybit_linear": ExchangeKey(api_key="ak2", api_secret="as2", label="alt"),
         },
-        consumer_tokens={"heatmap_sdk": "tok-1"},
+        consumer_tokens={"example_consumer": "tok-1"},
     )
 
 

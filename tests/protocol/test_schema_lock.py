@@ -114,14 +114,14 @@ def test_stop_atr_wire() -> None:
 
 
 # ---------------------------------------------------------------------------
-# UniversalSignal: heatmap-sdk UI scenario from SIGNAL_PROTOCOL.md
+# UniversalSignal: external UI consumer scenario from SIGNAL_PROTOCOL.md
 # ---------------------------------------------------------------------------
 
 
-def test_universal_signal_heatmap_ui_scenario_wire() -> None:
+def test_universal_signal_external_ui_scenario_wire() -> None:
     sig = T.UniversalSignal(
         signal_id="00000000-0000-0000-0000-000000000001",
-        source="heatmap_sdk",
+        source="external_ui",
         symbol="BTCUSDT",
         venue=T.Venue.BINANCE_UM,
         direction=T.Direction.LONG,
@@ -133,7 +133,7 @@ def test_universal_signal_heatmap_ui_scenario_wire() -> None:
         correlation_id="00000000-0000-0000-0000-000000000001",
         metadata={"ui_session": "op-1-2026-05"},
     )
-    _check("signal_heatmap_ui", ser.signal_to_wire(sig))
+    _check("signal_external_ui", ser.signal_to_wire(sig))
 
 
 def test_universal_signal_round_trip() -> None:

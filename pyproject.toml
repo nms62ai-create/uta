@@ -11,8 +11,8 @@ authors = [{ name = "nms6277" }]
 readme = "README.md"
 license = { text = "Proprietary" }
 
-# Core embedded-mode runtime (decision A3 / A3b). Keep minimal: a heatmap-sdk-class
-# consumer that only wants `import uta` should NOT pull FastAPI / Redis / Pydantic.
+# Core embedded-mode runtime (decision A3 / A3b). Keep minimal: any embedded
+# consumer that only wants `import trade_adapter` should NOT pull FastAPI / Redis / Pydantic.
 # Anything used purely by the optional gateway (HTTP server, Bearer-token plumbing,
 # CLI, Prometheus exposition, multi-process pub/sub) lives in extras below.
 dependencies = [

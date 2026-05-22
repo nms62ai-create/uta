@@ -2,7 +2,7 @@
 
 > **Status:** Pre-implementation revision (2026-05). The original v1.0
 > spec was locked at 15 decisions; an interim revision against
-> `heatmap-sdk` integration analysis took it to 17 (new **A3b**, new
+> integration-driven analysis took it to 17 (new **A3b**, new
 > **A16**, rewritten **A1/A3/A8**). A subsequent post-critique cleanup
 > raised it to 22: contradictions between the mandatory-Redis state
 > store and a sync audit-log on the hot path were resolved, and
@@ -86,7 +86,7 @@ versioning, independent deployment lifecycle.
 - `structlog` + `PyYAML` for logging and config
 - **No** `pydantic`, `numpy`, `pandas`, `scipy`, or `redis` in the core
   runtime. The base install is 7 wheels and ~12 MB of site-packages —
-  this is what `import uta` on a heatmap-sdk-class consumer pulls in.
+  this is what `import trade_adapter` on an embedded consumer pulls in.
 - `FastAPI` + `uvicorn` + `prometheus-client` + `click` are extras
   `[gateway]` and only land on disk if the operator opts into the
   optional HTTP/WS facade (A3 gateway mode).
@@ -123,7 +123,7 @@ The adapter ships as a Python package and supports two interchangeable
 modes against the same core:
 
 - **Embedded mode (default).** Consumers in the same Python process
-  (`heatmap-sdk`, custom strategies, the Adaptive Analytics SDK) import
+  (custom strategies, a manual UI, any analytics SDK) import
   `uta.TradeAdapter` directly. Commands are method calls
   (`place_order`, `cancel_order`, `close_position`); events are
   `async` iterators (`subscribe_orders`, `subscribe_positions`,
@@ -404,7 +404,7 @@ Adding a third venue must not require any changes outside
 ### A16. Market data publish
 
 The adapter publishes raw market data to internal subscribers (embedded
-mode) and to opted-in gateway consumers. This exists so heatmap-sdk-class
+mode) and to opted-in gateway consumers. This exists so embedded
 consumers do not have to open their own WebSocket to the same
 `(venue, symbol)`.
 
