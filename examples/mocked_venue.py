@@ -115,7 +115,8 @@ class FakeMarketData:
 
 async def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="uta-example-"))
-    dao = await SqliteDAO.open(tmp / "uta.db")
+    dao = SqliteDAO(tmp / "uta.db")
+    await dao.open()
 
     bus = EventBus()
     store = PositionStore()
